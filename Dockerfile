@@ -1,13 +1,17 @@
 FROM python:3.12-slim
 
-# Install ffmpeg for RTSP frame capture
+# Install ffmpeg and git for RTSP frame capture and cloning vivintpy
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
 RUN useradd -m -s /bin/bash secguard
 WORKDIR /app
+
+# Clone vivintpy library
+RUN git clone --depth 1 https://github.com/natekspencer/vivintpy.git
 
 # Copy requirements first for layer caching
 COPY requirements.txt .
@@ -15,7 +19,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY *.py ./
-COPY vivintpy ./vivintpy/
 
 # Create data directory
 RUN mkdir -p /app/data && chown -R secguard:secguard /app

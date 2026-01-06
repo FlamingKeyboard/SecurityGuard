@@ -27,7 +27,7 @@ if ! command -v tailscale &> /dev/null; then
 fi
 
 # Clone repository
-REPO_URL="${REPO_URL:-https://github.com/YOUR_USERNAME/SecurityGuardVivint.git}"
+REPO_URL="${REPO_URL:-https://github.com/FlamingKeyboard/SecurityGuard.git}"
 INSTALL_DIR="/opt/security-guard"
 
 if [ -d "$INSTALL_DIR" ]; then
@@ -39,6 +39,12 @@ else
     sudo git clone "$REPO_URL" "$INSTALL_DIR"
     sudo chown -R $USER:$USER "$INSTALL_DIR"
     cd "$INSTALL_DIR"
+fi
+
+# Clone vivintpy if not present (needed for local dev, Docker clones its own)
+if [ ! -d "vivintpy" ]; then
+    echo "Cloning vivintpy library..."
+    git clone --depth 1 https://github.com/natekspencer/vivintpy.git
 fi
 
 # Create .env file
