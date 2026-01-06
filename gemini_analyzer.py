@@ -1,4 +1,4 @@
-"""Gemini vision analysis for security assessment using google-genai SDK."""
+"""Gemini vision analysis for security assessment using google-genai SDK with structured outputs."""
 
 import asyncio
 import logging
@@ -6,45 +6,67 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from pydantic import BaseModel, Field
+
 import config
 
 _LOGGER = logging.getLogger(__name__)
 
-# Analysis prompt for security assessment
-SECURITY_ANALYSIS_PROMPT = """You are a security camera analysis system. Analyze this image from a home security camera.
 
-Focus on OBSERVABLE FACTS only. Do not make assumptions about intent or identity.
+# Pydantic model for structured output - Gemini will be forced to match this schema
+class WeaponDetection(BaseModel):
+    """Weapon detection result."""
+    detected: bool = Field(description="Whether a weapon is visible")
+    confidence: float = Field(description="Confidence level 0.0-1.0", ge=0.0, le=1.0)
+    description: str = Field(default="", description="Brief description if weapon detected")
 
-Provide your analysis in the following JSON format:
-{
-    "risk_tier": "low" | "medium" | "high",
-    "person_detected": true | false,
-    "person_count": <number>,
-    "activity_observed": ["list of observed activities"],
-    "potential_concerns": ["list of any concerning observations"],
-    "context_clues": ["delivery uniform", "package", "tools", "vehicle", etc.],
-    "weapon_visible": {
-        "detected": true | false | "uncertain",
-        "confidence": 0.0-1.0,
-        "description": "brief description if applicable"
-    },
-    "time_of_day_apparent": "day" | "night" | "unclear",
-    "recommended_action": "ignore" | "log" | "notify" | "urgent_alert",
-    "summary": "One sentence factual summary of what is visible"
-}
+
+class SecurityAnalysisResponse(BaseModel):
+    """Structured response schema for security analysis."""
+    risk_tier: Literal["low", "medium", "high"] = Field(
+        description="Risk level: low=normal activity, medium=unusual but not threatening, high=clearly concerning"
+    )
+    person_detected: bool = Field(description="Whether a person is visible in the image")
+    person_count: int = Field(default=0, description="Number of people visible", ge=0)
+    activity_observed: list[str] = Field(
+        default_factory=list,
+        description="List of observed activities (e.g., 'walking', 'carrying package', 'looking at door')"
+    )
+    potential_concerns: list[str] = Field(
+        default_factory=list,
+        description="List of any concerning observations"
+    )
+    context_clues: list[str] = Field(
+        default_factory=list,
+        description="Context clues like 'delivery uniform', 'package', 'tools', 'vehicle'"
+    )
+    weapon_visible: WeaponDetection = Field(
+        default_factory=lambda: WeaponDetection(detected=False, confidence=0.0, description="")
+    )
+    time_of_day_apparent: Literal["day", "night", "unclear"] = Field(
+        default="unclear",
+        description="Apparent time of day based on lighting"
+    )
+    recommended_action: Literal["ignore", "log", "notify", "urgent_alert"] = Field(
+        description="Recommended action based on analysis"
+    )
+    summary: str = Field(description="One sentence factual summary of what is visible")
+
+
+# Analysis prompt - simpler since schema is enforced
+SECURITY_ANALYSIS_PROMPT = """Analyze this security camera image. Focus on OBSERVABLE FACTS only.
 
 Risk tier guidelines:
-- LOW: Normal activity (delivery person, neighbor, mail carrier, resident)
-- MEDIUM: Unusual but not clearly threatening (unfamiliar person lingering, someone looking at windows)
-- HIGH: Clearly concerning activity (attempted entry, visible weapon, aggressive behavior, property damage)
+- low: Normal activity (delivery person, neighbor, mail carrier, resident, empty scene)
+- medium: Unusual but not clearly threatening (unfamiliar person lingering, someone looking at windows)
+- high: Clearly concerning (attempted entry, visible weapon, aggressive behavior, property damage)
 
-Be objective and evidence-based. If uncertain, err on the side of caution but note your uncertainty.
-Respond with valid JSON only, no markdown code blocks."""
+Be objective and evidence-based. If uncertain, note it in your response."""
 
 
 @dataclass
 class SecurityAnalysis:
-    """Result of security analysis."""
+    """Result of security analysis (for internal use)."""
     risk_tier: Literal["low", "medium", "high"]
     person_detected: bool
     person_count: int
@@ -75,7 +97,6 @@ def validate_api_key(key: str) -> bool:
     """Validate that the API key has the correct format."""
     if not key:
         return False
-    # Standard Gemini API keys from AI Studio start with "AIza"
     return key.startswith("AIza")
 
 
@@ -103,7 +124,7 @@ def _create_client():
 
 async def analyze_frame(frame_path: Path) -> SecurityAnalysis | None:
     """
-    Analyze a single frame using Gemini vision.
+    Analyze a single frame using Gemini vision with structured output.
 
     Args:
         frame_path: Path to the image file
@@ -117,12 +138,11 @@ async def analyze_frame(frame_path: Path) -> SecurityAnalysis | None:
 
     try:
         from google.genai import types
-        import json
 
         # Read image
         image_bytes = frame_path.read_bytes()
 
-        # Make request using the new SDK pattern
+        # Make request with structured output
         response = await asyncio.to_thread(
             client.models.generate_content,
             model=config.GEMINI_MODEL,
@@ -130,18 +150,24 @@ async def analyze_frame(frame_path: Path) -> SecurityAnalysis | None:
                 SECURITY_ANALYSIS_PROMPT,
                 types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg'),
             ],
+            config={
+                "response_mime_type": "application/json",
+                "response_schema": SecurityAnalysisResponse,
+            },
         )
 
         raw_text = response.text
 
-        # Parse JSON from response (handle markdown code blocks if present)
-        json_text = raw_text
-        if "```json" in json_text:
-            json_text = json_text.split("```json")[1].split("```")[0]
-        elif "```" in json_text:
-            json_text = json_text.split("```")[1].split("```")[0]
+        # Parse the structured response
+        import json
+        data = json.loads(raw_text)
 
-        data = json.loads(json_text.strip())
+        # Handle weapon_visible which may be a dict or need conversion
+        weapon_data = data.get("weapon_visible", {})
+        if isinstance(weapon_data, dict):
+            weapon_dict = weapon_data
+        else:
+            weapon_dict = {"detected": False, "confidence": 0.0, "description": ""}
 
         return SecurityAnalysis(
             risk_tier=data.get("risk_tier", "low"),
@@ -150,7 +176,7 @@ async def analyze_frame(frame_path: Path) -> SecurityAnalysis | None:
             activity_observed=data.get("activity_observed", []),
             potential_concerns=data.get("potential_concerns", []),
             context_clues=data.get("context_clues", []),
-            weapon_visible=data.get("weapon_visible", {"detected": False, "confidence": 0.0}),
+            weapon_visible=weapon_dict,
             time_of_day_apparent=data.get("time_of_day_apparent", "unclear"),
             recommended_action=data.get("recommended_action", "log"),
             summary=data.get("summary", ""),
@@ -169,8 +195,6 @@ async def analyze_frame(frame_path: Path) -> SecurityAnalysis | None:
 async def analyze_multiple_frames(frame_paths: list[Path]) -> SecurityAnalysis | None:
     """
     Analyze multiple frames and return the highest-risk assessment.
-
-    This helps reduce false negatives by checking multiple angles/moments.
     """
     if not frame_paths:
         return None
@@ -191,7 +215,7 @@ async def analyze_multiple_frames(frame_paths: list[Path]) -> SecurityAnalysis |
 
 async def test_analysis(image_path: str):
     """Test analysis on a single image."""
-    logging.basicConfig(level=logging.DEBUG)
+    logging.basicConfig(level=logging.INFO)
 
     path = Path(image_path)
     if not path.exists():
@@ -212,6 +236,7 @@ async def test_analysis(image_path: str):
         print(f"Time of Day: {analysis.time_of_day_apparent}")
         print(f"Recommended Action: {analysis.recommended_action}")
         print(f"\nSummary: {analysis.summary}")
+        print(f"\nRaw JSON:\n{analysis.raw_response}")
     else:
         print("Analysis failed")
 

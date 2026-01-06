@@ -146,8 +146,8 @@ def test_image_request(client, image_path: str = None):
 
 
 def test_security_analysis(client):
-    """Test the full security analysis prompt."""
-    print("\n=== Security Analysis Test ===")
+    """Test the full security analysis with structured output."""
+    print("\n=== Security Analysis Test (Structured Output) ===")
     if not client:
         print("SKIP: No client")
         return False
@@ -162,28 +162,38 @@ def test_security_analysis(client):
     path = frames[0]
     print(f"Using: {path.name}")
 
-    prompt = """Analyze this security camera image. Respond with JSON only:
-{
-    "risk_tier": "low" | "medium" | "high",
-    "person_detected": true | false,
-    "person_count": <number>,
-    "summary": "one sentence description"
-}"""
-
     try:
         from google.genai import types
+        from pydantic import BaseModel, Field
+        from typing import Literal
+
+        # Define schema for structured output
+        class TestAnalysis(BaseModel):
+            risk_tier: Literal["low", "medium", "high"]
+            person_detected: bool
+            person_count: int = Field(ge=0)
+            summary: str
 
         image_bytes = path.read_bytes()
 
         response = client.models.generate_content(
             model='gemini-2.0-flash',
             contents=[
-                prompt,
+                "Analyze this security camera image.",
                 types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg'),
             ],
+            config={
+                "response_mime_type": "application/json",
+                "response_schema": TestAnalysis,
+            },
         )
         print(f"SUCCESS: Security analysis complete")
         print(f"Response:\n{response.text}")
+
+        # Verify it's valid JSON
+        import json
+        data = json.loads(response.text)
+        print(f"Parsed: risk={data['risk_tier']}, person={data['person_detected']}")
         return True
     except Exception as e:
         print(f"FAIL: Security analysis failed: {e}")
