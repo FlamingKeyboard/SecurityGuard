@@ -42,6 +42,7 @@ RISK_LEVELS = {
     "critical": {"notify": True, "log": True, "urgent": True, "emergency": True, "priority": 2},
 }
 
-# Hub IP - use VIVINT_HUB_IP env var for container deployments (e.g., Tailscale IP)
-VIVINT_HUB_IP = os.getenv("VIVINT_HUB_IP", "192.168.8.132")
+# Hub IP - MUST be set via environment variable or changed here
+# Find your hub IP by checking your router's DHCP leases or running a network scan
+VIVINT_HUB_IP = os.getenv("VIVINT_HUB_IP", "")  # e.g., "192.168.1.100"
 VIVINT_HUB_RTSP_PORT = int(os.getenv("VIVINT_HUB_RTSP_PORT", "8554"))
