@@ -6,6 +6,7 @@ Main entry point that coordinates:
 - Frame capture on motion/doorbell events
 - Gemini vision analysis
 - Notifications based on risk assessment
+- GCP integration for logging and image archival
 """
 
 import asyncio
@@ -13,12 +14,19 @@ import logging
 import os
 import socket
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import aiohttp
 
 import config
+from gcp_logging import (
+    get_or_create_event_id,
+    get_or_create_conversation_id,
+    run_sync as run_gcp_sync,
+    test_bigquery_connection,
+)
+from gcp_storage import upload_image, archive_old_images, test_gcs_connection
 
 
 def check_hub_connectivity() -> bool:
@@ -99,12 +107,59 @@ def load_stored_credentials():
     # Gemini API key
     if creds.get("gemini_api_key") and not os.environ.get("GEMINI_API_KEY"):
         os.environ["GEMINI_API_KEY"] = creds["gemini_api_key"]
-        import importlib
-        importlib.reload(config)
 
-    # Pushover credentials
-    _pushover_token = creds.get("pushover_token")
-    _pushover_user = creds.get("pushover_user")
+    # GCP credentials
+    if creds.get("gcp_project_id") and not os.environ.get("GCP_PROJECT_ID"):
+        os.environ["GCP_PROJECT_ID"] = creds["gcp_project_id"]
+    if creds.get("gcp_service_account_file") and not os.environ.get("GCP_SERVICE_ACCOUNT_FILE"):
+        os.environ["GCP_SERVICE_ACCOUNT_FILE"] = creds["gcp_service_account_file"]
+
+    # Reload config to pick up new env vars
+    import importlib
+    importlib.reload(config)
+
+    # Pushover credentials (must use global declaration above)
+    _pushover_token = creds.get("pushover_token") or None
+    _pushover_user = creds.get("pushover_user") or None
+
+
+def check_gcp_connectivity() -> dict[str, tuple[bool, str]]:
+    """
+    Test GCP connectivity for both GCS and BigQuery.
+
+    Returns a dict with connection status for each service:
+        {
+            'gcs': (success: bool, message: str),
+            'bigquery': (success: bool, message: str)
+        }
+    """
+    results = {}
+
+    # Check if GCP is configured at all
+    if not config.GCP_PROJECT_ID and not config.GCP_SERVICE_ACCOUNT_FILE:
+        return {
+            'gcs': (False, "GCP not configured"),
+            'bigquery': (False, "GCP not configured")
+        }
+
+    # Test GCS connection
+    print("Checking GCS connectivity...")
+    results['gcs'] = test_gcs_connection()
+    if results['gcs'][0]:
+        print(f"  [OK] {results['gcs'][1]}")
+    else:
+        print(f"  [WARN] {results['gcs'][1]}")
+
+    # Test BigQuery connection
+    print("Checking BigQuery connectivity...")
+    results['bigquery'] = test_bigquery_connection()
+    if results['bigquery'][0]:
+        print(f"  [OK] {results['bigquery'][1]}")
+    else:
+        print(f"  [WARN] {results['bigquery'][1]}")
+
+    return results
+
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -279,6 +334,7 @@ class SecurityGuard:
         asyncio.create_task(self._event_processor())
         asyncio.create_task(self._keepalive_loop())
         asyncio.create_task(self._cleanup_loop())
+        asyncio.create_task(self._sync_loop())
 
         _LOGGER.info("Security Guard service started")
         _LOGGER.info("Monitoring %d cameras", len(self.client.cameras))
@@ -325,6 +381,13 @@ class SecurityGuard:
         """Process a single event."""
         _LOGGER.info("Processing %s event from %s", event_type, camera.name)
 
+        # Generate event and conversation IDs for logging/grouping
+        event_id = get_or_create_event_id()
+        conversation_id = get_or_create_conversation_id()
+        event_timestamp = datetime.now(timezone.utc)
+
+        _LOGGER.debug("Event ID: %s, Conversation ID: %s", event_id, conversation_id)
+
         # Get RTSP URL for this camera
         rtsp_url = self.client.get_rtsp_url(camera.id)
         if not rtsp_url:
@@ -341,8 +404,32 @@ class SecurityGuard:
 
         _LOGGER.info("Captured %d frames, analyzing...", len(frames))
 
-        # Analyze with Gemini
-        analysis = await analyze_multiple_frames(frames)
+        # Upload frames to GCS and collect URIs
+        image_uris = []
+        for i, frame_path in enumerate(frames):
+            uri = upload_image(
+                local_path=frame_path,
+                camera_name=camera.name,
+                event_id=event_id,
+                timestamp=event_timestamp,
+                frame_index=i,
+            )
+            if uri is None:
+                _LOGGER.warning(
+                    "Failed to upload frame %d for camera %s (event_id=%s)",
+                    i, camera.name, event_id
+                )
+            image_uris.append(uri)  # May be None if upload failed
+
+        # Analyze with Gemini (passing event/conversation IDs for logging)
+        analysis = await analyze_multiple_frames(
+            frames,
+            camera_name=camera.name,
+            event_type=event_type,
+            event_id=event_id,
+            conversation_id=conversation_id,
+            image_uris=image_uris,
+        )
 
         # Use first frame as the notification image
         image_path = frames[0] if frames else None
@@ -414,6 +501,30 @@ class SecurityGuard:
             if self._running:
                 cleanup_old_frames(max_age_hours=1)
 
+    async def _sync_loop(self) -> None:
+        """Periodically sync logs to BigQuery and archive old images to GCS."""
+        while self._running:
+            await asyncio.sleep(config.SYNC_INTERVAL_SECONDS)
+            if self._running:
+                try:
+                    # Sync logs to BigQuery
+                    synced, failed, cleaned = await run_gcp_sync()
+                    if synced > 0 or failed > 0 or cleaned > 0:
+                        _LOGGER.info(
+                            "GCP sync: %d logs synced, %d failed, %d cleaned up",
+                            synced, failed, cleaned
+                        )
+
+                    # Archive old images to GCS
+                    uploaded, deleted = await asyncio.to_thread(archive_old_images)
+                    if uploaded > 0 or deleted > 0:
+                        _LOGGER.info(
+                            "Image archival: %d uploaded to GCS, %d deleted locally",
+                            uploaded, deleted
+                        )
+                except Exception as e:
+                    _LOGGER.error("GCP sync failed: %s", e)
+
 
 async def main():
     """Main entry point."""
@@ -430,6 +541,12 @@ async def main():
 
     # Load stored credentials (API keys + Pushover)
     load_stored_credentials()
+
+    # Check GCP connectivity (if configured)
+    gcp_status = None
+    if config.GCP_PROJECT_ID or config.GCP_SERVICE_ACCOUNT_FILE:
+        print()
+        gcp_status = check_gcp_connectivity()
 
     # Check hub connectivity before starting
     print()
@@ -451,6 +568,35 @@ async def main():
     else:
         print("Pushover notifications: DISABLED (console only)")
         print("  Run setup_credentials.py to configure push notifications")
+
+    # GCP status
+    if config.GCP_PROJECT_ID or config.GCP_SERVICE_ACCOUNT_FILE:
+        # Check if GCP is actually reachable
+        gcs_ok = gcp_status and gcp_status.get('gcs', (False, ''))[0]
+        bq_ok = gcp_status and gcp_status.get('bigquery', (False, ''))[0]
+
+        if gcs_ok and bq_ok:
+            print(f"GCP integration: ENABLED - Connected (sync every {config.SYNC_INTERVAL_SECONDS}s)")
+        elif gcs_ok or bq_ok:
+            print(f"GCP integration: ENABLED - Partially Connected (sync every {config.SYNC_INTERVAL_SECONDS}s)")
+        else:
+            print(f"GCP integration: ENABLED - Connection Failed (will retry)")
+
+        # Show GCS status
+        if config.GCS_BUCKET_NAME:
+            gcs_status_icon = "[OK]" if gcs_ok else "[FAIL]"
+            print(f"  GCS {gcs_status_icon}: {config.GCS_BUCKET_NAME}")
+            if not gcs_ok and gcp_status:
+                print(f"    Error: {gcp_status.get('gcs', (False, 'Unknown'))[1]}")
+
+        # Show BigQuery status
+        bq_status_icon = "[OK]" if bq_ok else "[FAIL]"
+        print(f"  BigQuery {bq_status_icon}: {config.BQ_DATASET}.{config.BQ_TABLE}")
+        if not bq_ok and gcp_status:
+            print(f"    Error: {gcp_status.get('bigquery', (False, 'Unknown'))[1]}")
+    else:
+        print("GCP integration: DISABLED (local storage only)")
+
     print("Press Ctrl+C to stop.")
     print("=" * 60 + "\n")
 

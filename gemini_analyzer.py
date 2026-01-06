@@ -4,11 +4,12 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
 import config
+from gcp_logging import log_user_prompt, log_assistant_response
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -162,12 +163,24 @@ def _create_client():
         return None
 
 
-async def analyze_frame(frame_path: Path) -> SecurityAnalysis | None:
+async def analyze_frame(
+    frame_path: Path,
+    camera_name: str = "Unknown",
+    event_type: str = "motion",
+    event_id: str = "",
+    conversation_id: str = "",
+    image_uri: Optional[str] = None,
+) -> SecurityAnalysis | None:
     """
     Analyze a single frame using Gemini vision with structured output.
 
     Args:
         frame_path: Path to the image file
+        camera_name: Name of the camera
+        event_type: Type of event ("motion" or "doorbell")
+        event_id: Event ID for grouping simultaneous camera triggers
+        conversation_id: Conversation ID for grouping within time window
+        image_uri: GCS URI of the image (for logging)
 
     Returns:
         SecurityAnalysis object or None if analysis failed
@@ -176,16 +189,33 @@ async def analyze_frame(frame_path: Path) -> SecurityAnalysis | None:
     if not client:
         return None
 
+    model = config.GEMINI_MODEL
+
     try:
         from google.genai import types
+        import json
 
         # Read image
         image_bytes = frame_path.read_bytes()
 
+        # Log the user prompt (async, non-blocking)
+        if event_id and conversation_id:
+            asyncio.create_task(log_user_prompt(
+                prompt=SECURITY_ANALYSIS_PROMPT,
+                camera_name=camera_name,
+                event_type=event_type,
+                event_id=event_id,
+                conversation_id=conversation_id,
+                image_uri=image_uri,
+                model=model,
+            ))
+        else:
+            _LOGGER.debug("Skipping GCP logging: missing event_id or conversation_id for %s", camera_name)
+
         # Make request with structured output
         response = await asyncio.to_thread(
             client.models.generate_content,
-            model=config.GEMINI_MODEL,
+            model=model,
             contents=[
                 SECURITY_ANALYSIS_PROMPT,
                 types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg'),
@@ -199,7 +229,6 @@ async def analyze_frame(frame_path: Path) -> SecurityAnalysis | None:
         raw_text = response.text
 
         # Parse the structured response
-        import json
         data = json.loads(raw_text)
 
         # Handle weapon_visible which may be a dict or need conversion
@@ -208,6 +237,29 @@ async def analyze_frame(frame_path: Path) -> SecurityAnalysis | None:
             weapon_dict = weapon_data
         else:
             weapon_dict = {"detected": False, "confidence": 0.0, "description": ""}
+
+        # Log the assistant response (async, non-blocking)
+        if event_id and conversation_id:
+            asyncio.create_task(log_assistant_response(
+                response_text=raw_text,
+                camera_name=camera_name,
+                event_type=event_type,
+                event_id=event_id,
+                conversation_id=conversation_id,
+                model=model,
+                risk_tier=data.get("risk_tier"),
+                recommended_action=data.get("recommended_action"),
+                person_detected=data.get("person_detected"),
+                person_count=data.get("person_count"),
+                time_of_day_apparent=data.get("time_of_day_apparent"),
+                summary=data.get("summary"),
+                activity_observed=data.get("activity_observed"),
+                potential_concerns=data.get("potential_concerns"),
+                context_clues=data.get("context_clues"),
+                weapon_detected=weapon_dict.get("detected"),
+                weapon_confidence=weapon_dict.get("confidence"),
+                weapon_description=weapon_dict.get("description"),
+            ))
 
         return SecurityAnalysis(
             risk_tier=data.get("risk_tier", "low"),
@@ -232,16 +284,42 @@ async def analyze_frame(frame_path: Path) -> SecurityAnalysis | None:
         return None
 
 
-async def analyze_multiple_frames(frame_paths: list[Path]) -> SecurityAnalysis | None:
+async def analyze_multiple_frames(
+    frame_paths: list[Path],
+    camera_name: str = "Unknown",
+    event_type: str = "motion",
+    event_id: str = "",
+    conversation_id: str = "",
+    image_uris: Optional[list[str]] = None,
+) -> SecurityAnalysis | None:
     """
     Analyze multiple frames and return the highest-risk assessment.
+
+    Args:
+        frame_paths: List of paths to image files
+        camera_name: Name of the camera
+        event_type: Type of event ("motion" or "doorbell")
+        event_id: Event ID for grouping simultaneous camera triggers
+        conversation_id: Conversation ID for grouping within time window
+        image_uris: List of GCS URIs for the images (for logging)
     """
     if not frame_paths:
         return None
 
+    if image_uris is None:
+        image_uris = [None] * len(frame_paths)
+
     analyses = []
-    for path in frame_paths:
-        analysis = await analyze_frame(path)
+    for i, path in enumerate(frame_paths):
+        image_uri = image_uris[i] if i < len(image_uris) else None
+        analysis = await analyze_frame(
+            path,
+            camera_name=camera_name,
+            event_type=event_type,
+            event_id=event_id,
+            conversation_id=conversation_id,
+            image_uri=image_uri,
+        )
         if analysis:
             analyses.append(analysis)
 

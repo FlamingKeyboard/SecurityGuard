@@ -33,6 +33,15 @@ USER secguard
 # PUSHOVER_TOKEN - Pushover application token
 # PUSHOVER_USER - Pushover user key
 # VIVINT_HUB_IP - Tailscale IP of Vivint hub (default: 192.168.8.132)
+#
+# GCP Integration (optional, for cloud logging and image archival):
+# GCP_PROJECT_ID - Google Cloud project ID
+# GCP_SERVICE_ACCOUNT_FILE - Path to service account JSON (local dev only)
+# GCS_BUCKET_NAME - GCS bucket name (auto-generated if empty)
+# BQ_DATASET - BigQuery dataset name (default: security_guard)
+# BQ_TABLE - BigQuery table name (default: security_logs)
+#
+# Note: On GCE with ADC, only GCP_PROJECT_ID is needed
 
 # Health check - verify Python can import the app
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \

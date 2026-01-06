@@ -190,8 +190,50 @@ async def main():
 
     print()
 
-    # Step 5: Test RTSP capture (optional)
-    print("Step 5: Test RTSP Frame Capture")
+    # Step 5: GCP Integration
+    print("Step 5: Google Cloud Platform Integration")
+    print("-" * 40)
+
+    gcp_project = stored_creds.get("gcp_project_id", "") or os.environ.get("GCP_PROJECT_ID", "")
+    gcp_service_account = stored_creds.get("gcp_service_account_file", "") or os.environ.get("GCP_SERVICE_ACCOUNT_FILE", "")
+
+    if gcp_project:
+        print(f"GCP Project ID: {gcp_project} (stored)")
+    else:
+        print("GCP integration enables:")
+        print("  - Image archival to Google Cloud Storage")
+        print("  - Gemini API logging to BigQuery")
+        print()
+        print("To set up GCP:")
+        print("  1. Create a GCP project at https://console.cloud.google.com")
+        print("  2. Enable BigQuery and Cloud Storage APIs")
+        print("  3. For local dev: create a service account with Storage Admin + BigQuery Admin roles")
+        print("     Download the JSON key file")
+        print("  4. For production: use Application Default Credentials (ADC)")
+        print()
+        gcp_project = input("Enter your GCP Project ID (or Enter to skip): ").strip()
+
+    if gcp_project and not gcp_service_account:
+        print()
+        print("For local development, you can use a service account key file.")
+        print("For production (GCE/Cloud Run), leave empty to use ADC.")
+        gcp_service_account = input("Path to service account JSON file (or Enter to skip): ").strip()
+
+    if gcp_project:
+        os.environ["GCP_PROJECT_ID"] = gcp_project
+        save_data = {"gcp_project_id": gcp_project}
+        if gcp_service_account:
+            os.environ["GCP_SERVICE_ACCOUNT_FILE"] = gcp_service_account
+            save_data["gcp_service_account_file"] = gcp_service_account
+        save_credentials(save_data)
+        print("GCP settings saved.")
+    else:
+        print("Skipping GCP setup. Images will only be stored locally.")
+
+    print()
+
+    # Step 6: Test RTSP capture (optional)
+    print("Step 6: Test RTSP Frame Capture")
     print("-" * 40)
 
     test_rtsp = input("Test frame capture? (y/n): ").strip().lower()
@@ -220,15 +262,15 @@ async def main():
 
     print()
 
-    # Step 6: Optional diagnostics
-    print("Step 6: Run Diagnostics (Optional)")
+    # Step 7: Optional diagnostics
+    print("Step 7: Run Diagnostics (Optional)")
     print("-" * 40)
     print("These tests verify your setup is working correctly.")
     print()
 
     run_diag = input("Run diagnostic tests? (y/n): ").strip().lower()
     if run_diag == 'y':
-        await run_diagnostics(pushover_token, pushover_user, gemini_key)
+        await run_diagnostics(pushover_token, pushover_user, gemini_key, gcp_project)
 
     print()
     print("=" * 60)
@@ -243,7 +285,7 @@ async def main():
     print()
 
 
-async def run_diagnostics(pushover_token: str, pushover_user: str, gemini_key: str):
+async def run_diagnostics(pushover_token: str, pushover_user: str, gemini_key: str, gcp_project: str = ""):
     """Run optional diagnostic tests."""
     import socket
     import aiohttp
@@ -253,7 +295,7 @@ async def run_diagnostics(pushover_token: str, pushover_user: str, gemini_key: s
     print()
 
     # Test 1: Hub connectivity
-    print("[1/3] Hub Connectivity")
+    print("[1/4] Hub Connectivity")
     hub_ip = config.VIVINT_HUB_IP
     hub_port = config.VIVINT_HUB_RTSP_PORT
 
@@ -280,7 +322,7 @@ async def run_diagnostics(pushover_token: str, pushover_user: str, gemini_key: s
     print()
 
     # Test 2: Gemini API
-    print("[2/3] Gemini API")
+    print("[2/4] Gemini API")
     if not gemini_key:
         print("  [SKIP] Gemini API key not configured")
     else:
@@ -301,7 +343,7 @@ async def run_diagnostics(pushover_token: str, pushover_user: str, gemini_key: s
     print()
 
     # Test 3: Pushover
-    print("[3/3] Pushover Notification")
+    print("[3/4] Pushover Notification")
     if not pushover_token or not pushover_user:
         print("  [SKIP] Pushover not configured")
     else:
@@ -327,6 +369,37 @@ async def run_diagnostics(pushover_token: str, pushover_user: str, gemini_key: s
                 print(f"  [FAIL] Pushover error: {e}")
         else:
             print("  [SKIP] Skipped by user")
+
+    print()
+
+    # Test 4: GCP Integration (GCS + BigQuery)
+    print("[4/4] Google Cloud Platform")
+    if not gcp_project:
+        print("  [SKIP] GCP not configured")
+    else:
+        try:
+            from gcp_storage import test_gcs_connection, get_bucket_name
+            from gcp_logging import test_bigquery_connection
+
+            # Test GCS
+            gcs_ok, gcs_msg = test_gcs_connection()
+            if gcs_ok:
+                print(f"  [OK] GCS: {gcs_msg}")
+            else:
+                print(f"  [FAIL] GCS: {gcs_msg}")
+
+            # Test BigQuery
+            bq_ok, bq_msg = test_bigquery_connection()
+            if bq_ok:
+                print(f"  [OK] BigQuery: {bq_msg}")
+            else:
+                print(f"  [FAIL] BigQuery: {bq_msg}")
+
+        except ImportError as e:
+            print(f"  [FAIL] Missing GCP dependencies: {e}")
+            print("  Install with: pip install google-cloud-storage google-cloud-bigquery")
+        except Exception as e:
+            print(f"  [FAIL] GCP error: {e}")
 
     print()
     print("Diagnostics complete.")
