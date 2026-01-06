@@ -214,9 +214,21 @@ async def main():
         else:
             print("No RTSP URL available for first camera.")
 
-    # Disconnect
+    # Disconnect Vivint
     if connected:
         await client.disconnect()
+
+    print()
+
+    # Step 6: Optional diagnostics
+    print("Step 6: Run Diagnostics (Optional)")
+    print("-" * 40)
+    print("These tests verify your setup is working correctly.")
+    print()
+
+    run_diag = input("Run diagnostic tests? (y/n): ").strip().lower()
+    if run_diag == 'y':
+        await run_diagnostics(pushover_token, pushover_user, gemini_key)
 
     print()
     print("=" * 60)
@@ -229,6 +241,95 @@ async def main():
     print()
     print("All credentials are stored securely - no environment variables needed!")
     print()
+
+
+async def run_diagnostics(pushover_token: str, pushover_user: str, gemini_key: str):
+    """Run optional diagnostic tests."""
+    import socket
+    import aiohttp
+
+    print()
+    print("Running diagnostics...")
+    print()
+
+    # Test 1: Hub connectivity
+    print("[1/3] Hub Connectivity")
+    hub_ip = config.VIVINT_HUB_IP
+    hub_port = config.VIVINT_HUB_RTSP_PORT
+
+    if not hub_ip:
+        print("  [SKIP] VIVINT_HUB_IP not configured")
+    else:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(5)
+        try:
+            result = sock.connect_ex((hub_ip, hub_port))
+            if result == 0:
+                print(f"  [OK] Hub reachable at {hub_ip}:{hub_port}")
+            else:
+                print(f"  [FAIL] Cannot connect to {hub_ip}:{hub_port}")
+                print("    - Check hub IP is correct")
+                print("    - For cloud: verify Tailscale subnet routing")
+        except socket.timeout:
+            print(f"  [FAIL] Connection timed out to {hub_ip}:{hub_port}")
+        except Exception as e:
+            print(f"  [FAIL] {e}")
+        finally:
+            sock.close()
+
+    print()
+
+    # Test 2: Gemini API
+    print("[2/3] Gemini API")
+    if not gemini_key:
+        print("  [SKIP] Gemini API key not configured")
+    else:
+        try:
+            from google import genai
+            client = genai.Client(api_key=gemini_key)
+            response = client.models.generate_content(
+                model='gemini-2.0-flash',
+                contents='Reply with exactly: OK',
+            )
+            if 'OK' in response.text:
+                print("  [OK] Gemini API responding")
+            else:
+                print(f"  [OK] Gemini API responding (got: {response.text[:50]})")
+        except Exception as e:
+            print(f"  [FAIL] Gemini API error: {e}")
+
+    print()
+
+    # Test 3: Pushover
+    print("[3/3] Pushover Notification")
+    if not pushover_token or not pushover_user:
+        print("  [SKIP] Pushover not configured")
+    else:
+        send_test = input("  Send test notification to your phone? (y/n): ").strip().lower()
+        if send_test == 'y':
+            try:
+                url = "https://api.pushover.net/1/messages.json"
+                data = aiohttp.FormData()
+                data.add_field("token", pushover_token)
+                data.add_field("user", pushover_user)
+                data.add_field("title", "Security Guard - Test")
+                data.add_field("message", "Setup diagnostic test successful!")
+                data.add_field("priority", "0")  # Normal priority
+
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url, data=data) as resp:
+                        if resp.status == 200:
+                            print("  [OK] Test notification sent - check your phone!")
+                        else:
+                            body = await resp.text()
+                            print(f"  [FAIL] Pushover error: {resp.status} - {body}")
+            except Exception as e:
+                print(f"  [FAIL] Pushover error: {e}")
+        else:
+            print("  [SKIP] Skipped by user")
+
+    print()
+    print("Diagnostics complete.")
 
 
 if __name__ == "__main__":
