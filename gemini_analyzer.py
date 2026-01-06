@@ -23,8 +23,8 @@ class WeaponDetection(BaseModel):
 
 class SecurityAnalysisResponse(BaseModel):
     """Structured response schema for security analysis."""
-    risk_tier: Literal["low", "medium", "high"] = Field(
-        description="Risk level: low=normal activity, medium=unusual but not threatening, high=clearly concerning"
+    risk_tier: Literal["low", "medium", "high", "critical"] = Field(
+        description="Risk level based on threat assessment"
     )
     person_detected: bool = Field(description="Whether a person is visible in the image")
     person_count: int = Field(default=0, description="Number of people visible", ge=0)
@@ -38,7 +38,7 @@ class SecurityAnalysisResponse(BaseModel):
     )
     context_clues: list[str] = Field(
         default_factory=list,
-        description="Context clues like 'delivery uniform', 'package', 'tools', 'vehicle'"
+        description="Context clues like 'delivery uniform', 'package', 'tools', 'vehicle', 'face covering'"
     )
     weapon_visible: WeaponDetection = Field(
         default_factory=lambda: WeaponDetection(detected=False, confidence=0.0, description="")
@@ -47,27 +47,67 @@ class SecurityAnalysisResponse(BaseModel):
         default="unclear",
         description="Apparent time of day based on lighting"
     )
-    recommended_action: Literal["ignore", "log", "notify", "urgent_alert"] = Field(
+    recommended_action: Literal["ignore", "log", "notify", "urgent_alert", "call_police"] = Field(
         description="Recommended action based on analysis"
     )
     summary: str = Field(description="One sentence factual summary of what is visible")
 
 
-# Analysis prompt - simpler since schema is enforced
-SECURITY_ANALYSIS_PROMPT = """Analyze this security camera image. Focus on OBSERVABLE FACTS only.
+# Analysis prompt - comprehensive security assessment
+SECURITY_ANALYSIS_PROMPT = """Analyze this security camera image for a home security system. Focus on OBSERVABLE FACTS only.
 
-Risk tier guidelines:
-- low: Normal activity (delivery person, neighbor, mail carrier, resident, empty scene)
-- medium: Unusual but not clearly threatening (unfamiliar person lingering, someone looking at windows)
-- high: Clearly concerning (attempted entry, visible weapon, aggressive behavior, property damage)
+RISK TIER GUIDELINES:
 
-Be objective and evidence-based. If uncertain, note it in your response."""
+LOW - Normal, expected activity:
+- Empty scene, no people
+- Residents, family members, expected visitors
+- Delivery person with package, uniform visible
+- Mail carrier, utility worker with ID/uniform
+- Neighbor walking by, kids playing
+- Animals, wildlife
+→ Action: ignore or log
+
+MEDIUM - Unusual, warrants attention:
+- Unfamiliar person on property without clear purpose
+- Someone lingering or looking at windows/doors
+- Person at door who doesn't ring bell
+- Activity at unusual hours (night) without context
+- Unidentified vehicle parked and watching
+- Person photographing the property
+→ Action: notify
+
+HIGH - Clearly concerning, potential threat:
+- Someone trying door handles or windows
+- Person peering into windows
+- Trespassing in backyard/side areas
+- Face coverings combined with suspicious behavior
+- Tools that could be used for break-in (pry bar, etc.)
+- Property damage in progress
+- Someone casing the property (returning multiple times)
+→ Action: urgent_alert
+
+CRITICAL - Immediate danger, emergency:
+- Visible weapon (gun, knife, bat used threateningly)
+- Active break-in or forced entry
+- Physical assault or violence
+- Fire or smoke visible
+- Someone in distress or injured
+- Multiple people acting aggressively
+→ Action: call_police
+
+CONTEXT MATTERS:
+- Night activity is more suspicious than daytime
+- Face coverings at night are more concerning than during cold weather
+- Uniforms and packages suggest legitimate visitors
+- Note any vehicles, license plates if visible
+
+Be objective. Report what you SEE, not what you assume. If uncertain, err on the side of caution but note your uncertainty."""
 
 
 @dataclass
 class SecurityAnalysis:
     """Result of security analysis (for internal use)."""
-    risk_tier: Literal["low", "medium", "high"]
+    risk_tier: Literal["low", "medium", "high", "critical"]
     person_detected: bool
     person_count: int
     activity_observed: list[str]
@@ -209,7 +249,7 @@ async def analyze_multiple_frames(frame_paths: list[Path]) -> SecurityAnalysis |
         return None
 
     # Return the highest-risk analysis
-    risk_order = {"high": 3, "medium": 2, "low": 1}
+    risk_order = {"critical": 4, "high": 3, "medium": 2, "low": 1}
     return max(analyses, key=lambda a: risk_order.get(a.risk_tier, 0))
 
 

@@ -120,6 +120,12 @@ async def send_pushover(
         data.add_field("message", message)
         data.add_field("priority", str(priority))
 
+        # Emergency priority (2) requires retry and expire parameters
+        if priority == 2:
+            data.add_field("retry", "30")   # Retry every 30 seconds
+            data.add_field("expire", "300") # Stop after 5 minutes
+            data.add_field("sound", "siren")  # Use siren sound for emergencies
+
         # Attach image if provided
         if image_path and image_path.exists():
             image_bytes = image_path.read_bytes()
@@ -148,7 +154,7 @@ async def send_pushover(
 async def send_notification(
     message: str,
     title: str = "Security Alert",
-    urgent: bool = False,
+    priority: int = 0,
     image_path: Path | None = None,
 ) -> None:
     """
@@ -157,11 +163,18 @@ async def send_notification(
     Args:
         message: Notification body
         title: Notification title
-        urgent: If True, use high priority (bypasses quiet hours)
+        priority: Pushover priority (-2 to 2). 1=high, 2=emergency
         image_path: Optional image to attach
     """
+    # Determine urgency for console display
+    if priority >= 2:
+        prefix = "[EMERGENCY] "
+    elif priority >= 1:
+        prefix = "[URGENT] "
+    else:
+        prefix = ""
+
     # Always log to console
-    prefix = "[URGENT] " if urgent else ""
     print(f"\n{'='*60}")
     print(f"{prefix}SECURITY NOTIFICATION - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
@@ -173,8 +186,6 @@ async def send_notification(
     print("=" * 60 + "\n")
 
     # Send via Pushover
-    # Priority: 0 = normal, 1 = high (bypasses quiet hours), 2 = emergency (requires ack)
-    priority = 1 if urgent else 0
     await send_pushover(title, message, image_path=image_path, priority=priority)
 
 
@@ -291,24 +302,34 @@ class SecurityGuard:
                      camera.name, analysis.risk_tier, analysis.recommended_action)
         _LOGGER.info("Summary: %s", analysis.summary)
 
-        # Notify if person detected OR risk level warrants it
-        should_notify = analysis.person_detected
+        # Get risk configuration
         risk_config = config.RISK_LEVELS.get(analysis.risk_tier, {})
-        if risk_config.get("notify"):
-            should_notify = True
 
-        urgent = risk_config.get("urgent", False) or analysis.risk_tier == "high"
+        # Notify if person detected OR risk level warrants it
+        should_notify = analysis.person_detected or risk_config.get("notify", False)
+
+        # Get priority from config (default to 0 = normal)
+        priority = risk_config.get("priority", 0)
 
         if should_notify:
             # Build title with emoji based on risk
-            risk_emoji = {"low": "✅", "medium": "⚠️", "high": "🚨"}.get(analysis.risk_tier, "")
+            risk_emoji = {
+                "low": "✅",
+                "medium": "⚠️",
+                "high": "🚨",
+                "critical": "🆘",
+            }.get(analysis.risk_tier, "")
             title = f"{risk_emoji} {camera.name}"
+
+            # Add CRITICAL prefix for emergency situations
+            if analysis.risk_tier == "critical":
+                title = f"🆘 CRITICAL: {camera.name}"
 
             notification = format_notification(camera.name, analysis)
             await send_notification(
                 message=notification,
                 title=title,
-                urgent=urgent,
+                priority=priority,
                 image_path=image_path,
             )
 

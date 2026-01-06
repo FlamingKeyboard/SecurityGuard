@@ -167,9 +167,9 @@ def test_security_analysis(client):
         from pydantic import BaseModel, Field
         from typing import Literal
 
-        # Define schema for structured output
+        # Define schema for structured output (matches gemini_analyzer.py)
         class TestAnalysis(BaseModel):
-            risk_tier: Literal["low", "medium", "high"]
+            risk_tier: Literal["low", "medium", "high", "critical"]
             person_detected: bool
             person_count: int = Field(ge=0)
             summary: str

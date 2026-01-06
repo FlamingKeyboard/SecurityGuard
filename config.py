@@ -34,10 +34,12 @@ MOTION_COOLDOWN_SECONDS = 30  # Don't re-alert for same camera within this windo
 KEEPALIVE_INTERVAL_SECONDS = 300  # 5 minutes - refresh session to keep PubNub alive
 
 # Risk classification thresholds
+# priority: 0=normal, 1=high (bypass quiet hours), 2=emergency (requires ack)
 RISK_LEVELS = {
-    "low": {"notify": False, "log": True},
-    "medium": {"notify": True, "log": True},
-    "high": {"notify": True, "log": True, "urgent": True},
+    "low": {"notify": False, "log": True, "priority": -1},
+    "medium": {"notify": True, "log": True, "priority": 0},
+    "high": {"notify": True, "log": True, "urgent": True, "priority": 1},
+    "critical": {"notify": True, "log": True, "urgent": True, "emergency": True, "priority": 2},
 }
 
 # Hub IP (from your port scan)
