@@ -13,21 +13,35 @@ import logging
 import os
 import time
 from datetime import datetime
+from pathlib import Path
+
+import aiohttp
 
 import config
 from vivint_client import VivintClient, load_credentials
 from frame_capture import capture_frames, cleanup_old_frames
 from gemini_analyzer import analyze_multiple_frames, SecurityAnalysis
 
+# Pushover credentials (loaded at startup)
+_pushover_token: str | None = None
+_pushover_user: str | None = None
 
-def load_stored_api_keys():
-    """Load API keys from stored credentials into environment."""
+
+def load_stored_credentials():
+    """Load API keys and notification credentials from stored credentials."""
+    global _pushover_token, _pushover_user
+
     creds = load_credentials() or {}
+
+    # Gemini API key
     if creds.get("gemini_api_key") and not os.environ.get("GEMINI_API_KEY"):
         os.environ["GEMINI_API_KEY"] = creds["gemini_api_key"]
-        # Reload config to pick up the change
         import importlib
         importlib.reload(config)
+
+    # Pushover credentials
+    _pushover_token = creds.get("pushover_token")
+    _pushover_user = creds.get("pushover_user")
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -74,44 +88,94 @@ def format_notification(camera_name: str, analysis: SecurityAnalysis) -> str:
     return "\n".join(lines)
 
 
-def send_notification(message: str, urgent: bool = False) -> None:
+async def send_pushover(
+    title: str,
+    message: str,
+    image_path: Path | None = None,
+    priority: int = 0,
+) -> bool:
     """
-    Send a notification.
+    Send a push notification via Pushover.
 
-    This is a placeholder - implement your preferred notification method:
-    - Windows toast notification
-    - Discord webhook
-    - Pushover/Pushbullet
-    - SMS via Twilio
-    - etc.
+    Args:
+        title: Notification title
+        message: Notification body
+        image_path: Optional path to image to attach
+        priority: -2 (silent) to 2 (emergency). 1 = high priority, bypasses quiet hours
+
+    Returns:
+        True if sent successfully
     """
+    if not _pushover_token or not _pushover_user:
+        _LOGGER.debug("Pushover not configured, skipping push notification")
+        return False
+
+    url = "https://api.pushover.net/1/messages.json"
+
+    try:
+        data = aiohttp.FormData()
+        data.add_field("token", _pushover_token)
+        data.add_field("user", _pushover_user)
+        data.add_field("title", title)
+        data.add_field("message", message)
+        data.add_field("priority", str(priority))
+
+        # Attach image if provided
+        if image_path and image_path.exists():
+            image_bytes = image_path.read_bytes()
+            data.add_field(
+                "attachment",
+                image_bytes,
+                filename=image_path.name,
+                content_type="image/jpeg",
+            )
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, data=data) as resp:
+                if resp.status == 200:
+                    _LOGGER.info("Pushover notification sent successfully")
+                    return True
+                else:
+                    body = await resp.text()
+                    _LOGGER.error("Pushover failed: %s - %s", resp.status, body)
+                    return False
+
+    except Exception as e:
+        _LOGGER.error("Failed to send Pushover notification: %s", e)
+        return False
+
+
+async def send_notification(
+    message: str,
+    title: str = "Security Alert",
+    urgent: bool = False,
+    image_path: Path | None = None,
+) -> None:
+    """
+    Send a notification via Pushover and console.
+
+    Args:
+        message: Notification body
+        title: Notification title
+        urgent: If True, use high priority (bypasses quiet hours)
+        image_path: Optional image to attach
+    """
+    # Always log to console
     prefix = "[URGENT] " if urgent else ""
     print(f"\n{'='*60}")
     print(f"{prefix}SECURITY NOTIFICATION - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
+    print(f"{title}")
+    print("-" * 40)
     print(message)
+    if image_path:
+        print(f"Image: {image_path}")
     print("=" * 60 + "\n")
 
-    # TODO: Implement actual notification
-    # Examples:
-    #
-    # Windows toast:
-    # from win10toast import ToastNotifier
-    # toaster = ToastNotifier()
-    # toaster.show_toast("Security Alert", message[:256], duration=10)
-    #
-    # Discord webhook:
-    # import requests
-    # requests.post(DISCORD_WEBHOOK_URL, json={"content": message})
-    #
-    # Pushover:
-    # import requests
-    # requests.post("https://api.pushover.net/1/messages.json", data={
-    #     "token": PUSHOVER_TOKEN,
-    #     "user": PUSHOVER_USER,
-    #     "message": message,
-    #     "priority": 2 if urgent else 0,
-    # })
+    # Send via Pushover
+    # Priority: 0 = normal, 1 = high (bypasses quiet hours), 2 = emergency (requires ack)
+    priority = 1 if urgent else 0
+    await send_pushover(title, message, image_path=image_path, priority=priority)
 
 
 class SecurityGuard:
@@ -206,12 +270,19 @@ class SecurityGuard:
         # Analyze with Gemini
         analysis = await analyze_multiple_frames(frames)
 
+        # Use first frame as the notification image
+        image_path = frames[0] if frames else None
+
         if not analysis:
             _LOGGER.warning("Analysis failed for %s, sending raw notification", camera.name)
-            send_notification(
-                f"Motion detected on {camera.name} but analysis failed.\n"
-                f"Event type: {event_type}\n"
-                f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            await send_notification(
+                message=(
+                    f"Motion detected but analysis failed.\n"
+                    f"Event type: {event_type}\n"
+                    f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                ),
+                title=f"⚠️ {camera.name}",
+                image_path=image_path,
             )
             return
 
@@ -220,13 +291,26 @@ class SecurityGuard:
                      camera.name, analysis.risk_tier, analysis.recommended_action)
         _LOGGER.info("Summary: %s", analysis.summary)
 
-        # Determine notification based on risk level
+        # Notify if person detected OR risk level warrants it
+        should_notify = analysis.person_detected
         risk_config = config.RISK_LEVELS.get(analysis.risk_tier, {})
-
         if risk_config.get("notify"):
+            should_notify = True
+
+        urgent = risk_config.get("urgent", False) or analysis.risk_tier == "high"
+
+        if should_notify:
+            # Build title with emoji based on risk
+            risk_emoji = {"low": "✅", "medium": "⚠️", "high": "🚨"}.get(analysis.risk_tier, "")
+            title = f"{risk_emoji} {camera.name}"
+
             notification = format_notification(camera.name, analysis)
-            urgent = risk_config.get("urgent", False)
-            send_notification(notification, urgent=urgent)
+            await send_notification(
+                message=notification,
+                title=title,
+                urgent=urgent,
+                image_path=image_path,
+            )
 
     async def _keepalive_loop(self) -> None:
         """Periodically refresh the session to keep PubNub alive."""
@@ -260,8 +344,8 @@ async def main():
     logging.getLogger("pubnub").setLevel(logging.WARNING)
     logging.getLogger("aiohttp").setLevel(logging.WARNING)
 
-    # Load stored API keys
-    load_stored_api_keys()
+    # Load stored credentials (API keys + Pushover)
+    load_stored_credentials()
 
     guard = SecurityGuard()
 
@@ -272,6 +356,11 @@ async def main():
     print("Security Guard Service Running")
     print("=" * 60)
     print("Monitoring cameras for motion and doorbell events.")
+    if _pushover_token and _pushover_user:
+        print("Pushover notifications: ENABLED")
+    else:
+        print("Pushover notifications: DISABLED (console only)")
+        print("  Run setup_credentials.py to configure push notifications")
     print("Press Ctrl+C to stop.")
     print("=" * 60 + "\n")
 

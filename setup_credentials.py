@@ -153,8 +153,45 @@ async def main():
 
     print()
 
-    # Step 4: Test RTSP capture (optional)
-    print("Step 4: Test RTSP Frame Capture")
+    # Step 4: Pushover credentials
+    print("Step 4: Pushover Push Notifications")
+    print("-" * 40)
+
+    pushover_token = stored_creds.get("pushover_token", "")
+    pushover_user = stored_creds.get("pushover_user", "")
+
+    if pushover_token and pushover_user:
+        print(f"Pushover App Token: {pushover_token[:8]}... (stored)")
+        print(f"Pushover User Key: {pushover_user[:8]}... (stored)")
+    else:
+        print("Pushover sends push notifications to your phone with images.")
+        print()
+        print("Setup (one-time, $5 for the app):")
+        print("  1. Download Pushover app on iOS/Android")
+        print("  2. Create account at https://pushover.net")
+        print("  3. Your User Key is shown on the dashboard")
+        print("  4. Create an Application at https://pushover.net/apps/build")
+        print("     - Name it 'Vivint Security Guard' or similar")
+        print("     - Copy the API Token/Key")
+        print()
+
+        pushover_user = input("Enter your Pushover User Key (or Enter to skip): ").strip()
+        if pushover_user:
+            pushover_token = input("Enter your Pushover App Token: ").strip()
+
+    if pushover_token and pushover_user:
+        save_credentials({
+            "pushover_token": pushover_token,
+            "pushover_user": pushover_user,
+        })
+        print("Pushover credentials saved securely.")
+    else:
+        print("Skipping Pushover setup. Notifications will only appear in console.")
+
+    print()
+
+    # Step 5: Test RTSP capture (optional)
+    print("Step 5: Test RTSP Frame Capture")
     print("-" * 40)
 
     test_rtsp = input("Test frame capture? (y/n): ").strip().lower()
