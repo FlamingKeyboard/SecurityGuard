@@ -11,6 +11,7 @@ Main entry point that coordinates:
 import asyncio
 import logging
 import os
+import socket
 import time
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +19,68 @@ from pathlib import Path
 import aiohttp
 
 import config
+
+
+def check_hub_connectivity() -> bool:
+    """
+    Check if the Vivint hub is reachable on the network.
+
+    Returns True if reachable, False otherwise.
+    """
+    hub_ip = config.VIVINT_HUB_IP
+    hub_port = config.VIVINT_HUB_RTSP_PORT
+
+    if not hub_ip:
+        print("ERROR: VIVINT_HUB_IP is not configured")
+        print("  Set it in config.py or via environment variable")
+        print("  Find your hub IP in your router's DHCP leases")
+        return False
+
+    print(f"Checking hub connectivity: {hub_ip}:{hub_port}")
+
+    # Try to connect to the RTSP port
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(5)
+
+    try:
+        result = sock.connect_ex((hub_ip, hub_port))
+        if result == 0:
+            print(f"  [OK] Hub is reachable at {hub_ip}:{hub_port}")
+            return True
+        else:
+            print(f"  [FAIL] Cannot connect to {hub_ip}:{hub_port} (error code: {result})")
+            _print_connectivity_help(hub_ip)
+            return False
+    except socket.timeout:
+        print(f"  [FAIL] Connection timed out to {hub_ip}:{hub_port}")
+        _print_connectivity_help(hub_ip)
+        return False
+    except socket.gaierror as e:
+        print(f"  [FAIL] DNS/address error for {hub_ip}: {e}")
+        return False
+    except Exception as e:
+        print(f"  [FAIL] Connection error: {e}")
+        _print_connectivity_help(hub_ip)
+        return False
+    finally:
+        sock.close()
+
+
+def _print_connectivity_help(hub_ip: str) -> None:
+    """Print helpful troubleshooting tips for connectivity issues."""
+    print()
+    print("Troubleshooting:")
+    print(f"  1. Verify the hub IP is correct: {hub_ip}")
+    print("  2. Make sure the hub is powered on and connected")
+    print("  3. If running in cloud/container:")
+    print("     - Check Tailscale is connected: tailscale status")
+    print("     - Verify subnet routing is enabled on your router")
+    print("     - Try pinging the hub: ping " + hub_ip)
+    print("  4. If running locally:")
+    print("     - Ensure you're on the same network as the hub")
+    print("     - Check for firewall blocking port 8554")
+
+
 from vivint_client import VivintClient, load_credentials
 from frame_capture import capture_frames, cleanup_old_frames
 from gemini_analyzer import analyze_multiple_frames, SecurityAnalysis
@@ -367,6 +430,12 @@ async def main():
 
     # Load stored credentials (API keys + Pushover)
     load_stored_credentials()
+
+    # Check hub connectivity before starting
+    print()
+    if not check_hub_connectivity():
+        print("\nHub connectivity check failed. Exiting.")
+        return
 
     guard = SecurityGuard()
 
