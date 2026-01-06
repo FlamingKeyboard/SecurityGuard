@@ -17,7 +17,7 @@ TOKEN_FILE = DATA_DIR / "vivint_tokens.enc"
 
 # Gemini API
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = "gemini-2.5-pro"  # State of the art vision model
+GEMINI_MODEL = "gemini-2.0-flash"  # Fast vision model, good for real-time analysis
 
 # Frame capture settings
 FRAME_CAPTURE_DIR = DATA_DIR / "frames"

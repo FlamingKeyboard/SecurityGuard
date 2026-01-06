@@ -1,8 +1,6 @@
-"""Gemini vision analysis for security assessment."""
+"""Gemini vision analysis for security assessment using google-genai SDK."""
 
 import asyncio
-import base64
-import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,7 +38,8 @@ Risk tier guidelines:
 - MEDIUM: Unusual but not clearly threatening (unfamiliar person lingering, someone looking at windows)
 - HIGH: Clearly concerning activity (attempted entry, visible weapon, aggressive behavior, property damage)
 
-Be objective and evidence-based. If uncertain, err on the side of caution but note your uncertainty."""
+Be objective and evidence-based. If uncertain, err on the side of caution but note your uncertainty.
+Respond with valid JSON only, no markdown code blocks."""
 
 
 @dataclass
@@ -62,15 +61,44 @@ class SecurityAnalysis:
 def get_gemini_api_key() -> str | None:
     """Get Gemini API key from env or stored credentials."""
     import os
-    key = os.environ.get("GEMINI_API_KEY")
+    key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not key:
-        # Try loading from stored credentials
         try:
             from vivint_client import get_stored_credential
             key = get_stored_credential("gemini_api_key")
         except Exception:
             pass
     return key
+
+
+def validate_api_key(key: str) -> bool:
+    """Validate that the API key has the correct format."""
+    if not key:
+        return False
+    # Standard Gemini API keys from AI Studio start with "AIza"
+    return key.startswith("AIza")
+
+
+def _create_client():
+    """Create and return a Gemini client."""
+    api_key = get_gemini_api_key()
+    if not api_key:
+        _LOGGER.error("No Gemini API key found. Run setup_credentials.py to configure.")
+        return None
+
+    if not validate_api_key(api_key):
+        _LOGGER.error(
+            "Invalid Gemini API key format. Keys should start with 'AIza'. "
+            "Get a valid key from https://aistudio.google.com/apikey"
+        )
+        return None
+
+    try:
+        from google import genai
+        return genai.Client(api_key=api_key)
+    except Exception as e:
+        _LOGGER.error("Failed to create Gemini client: %s", e)
+        return None
 
 
 async def analyze_frame(frame_path: Path) -> SecurityAnalysis | None:
@@ -83,36 +111,30 @@ async def analyze_frame(frame_path: Path) -> SecurityAnalysis | None:
     Returns:
         SecurityAnalysis object or None if analysis failed
     """
-    api_key = get_gemini_api_key()
-    if not api_key:
-        _LOGGER.error("GEMINI_API_KEY not set. Run setup_credentials.py to configure.")
+    client = _create_client()
+    if not client:
         return None
 
     try:
-        import google.generativeai as genai
+        from google.genai import types
+        import json
 
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(config.GEMINI_MODEL)
+        # Read image
+        image_bytes = frame_path.read_bytes()
 
-        # Read and encode the image
-        image_data = frame_path.read_bytes()
-        image_b64 = base64.b64encode(image_data).decode()
-
-        # Create the image part for Gemini
-        image_part = {
-            "mime_type": "image/jpeg",
-            "data": image_b64
-        }
-
-        # Generate analysis
+        # Make request using the new SDK pattern
         response = await asyncio.to_thread(
-            model.generate_content,
-            [SECURITY_ANALYSIS_PROMPT, image_part]
+            client.models.generate_content,
+            model=config.GEMINI_MODEL,
+            contents=[
+                SECURITY_ANALYSIS_PROMPT,
+                types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg'),
+            ],
         )
 
         raw_text = response.text
 
-        # Parse JSON from response (handle markdown code blocks)
+        # Parse JSON from response (handle markdown code blocks if present)
         json_text = raw_text
         if "```json" in json_text:
             json_text = json_text.split("```json")[1].split("```")[0]
@@ -135,9 +157,6 @@ async def analyze_frame(frame_path: Path) -> SecurityAnalysis | None:
             raw_response=raw_text,
         )
 
-    except ImportError:
-        _LOGGER.error("google-generativeai package not installed. Run: pip install google-generativeai")
-        return None
     except json.JSONDecodeError as e:
         _LOGGER.error("Failed to parse Gemini response as JSON: %s", e)
         _LOGGER.debug("Raw response: %s", raw_text if 'raw_text' in locals() else "N/A")

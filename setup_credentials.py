@@ -111,18 +111,38 @@ async def main():
     print("Step 3: Gemini API Key")
     print("-" * 40)
 
+    def is_valid_gemini_key(key):
+        """Check if key has valid format (starts with AIza)."""
+        return key and key.startswith("AIza")
+
     # Check env, then stored, then prompt
     gemini_key = os.environ.get("GEMINI_API_KEY", "")
     if not gemini_key:
         gemini_key = stored_creds.get("gemini_api_key", "")
 
-    if gemini_key:
-        print(f"Gemini API key: {gemini_key[:15]}... (stored)")
-    else:
+    if gemini_key and is_valid_gemini_key(gemini_key):
+        print(f"Gemini API key: {gemini_key[:15]}... (stored, valid format)")
+    elif gemini_key:
+        print(f"Stored key has invalid format: {gemini_key[:10]}...")
+        print("Valid Gemini API keys start with 'AIza'")
+        gemini_key = ""  # Force re-entry
+
+    if not gemini_key:
         print("To use AI-powered security analysis, you need a Gemini API key.")
-        print("Get one at: https://aistudio.google.com/apikey")
         print()
-        gemini_key = input("Enter your Gemini API key (or press Enter to skip): ").strip()
+        print("Get one at: https://aistudio.google.com/apikey")
+        print("  1. Click 'Create API Key'")
+        print("  2. The key should start with 'AIzaSy...'")
+        print()
+        while True:
+            gemini_key = input("Enter your Gemini API key (or press Enter to skip): ").strip()
+            if not gemini_key:
+                break
+            if is_valid_gemini_key(gemini_key):
+                break
+            print(f"Invalid key format. Keys should start with 'AIza', got: {gemini_key[:10]}...")
+            print("Please get a key from https://aistudio.google.com/apikey")
+            gemini_key = ""
 
     if gemini_key:
         os.environ["GEMINI_API_KEY"] = gemini_key
