@@ -1,6 +1,7 @@
 # Credentials and sensitive data (encrypted but still exclude)
 data/
 *.enc
+.env
 
 # Python
 __pycache__/

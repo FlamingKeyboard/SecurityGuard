@@ -1,0 +1,5 @@
+# Additional Windows dependencies
+# Install with: pip install -r requirements.txt -r requirements-windows.txt
+
+# Windows token encryption (DPAPI)
+pywin32>=306

@@ -1,0 +1,51 @@
+# Podman/Docker Compose for Vivint Security Guard
+#
+# Usage:
+#   1. Copy env.example to .env and fill in your credentials
+#   2. Run: podman-compose up -d
+#
+# For GCE deployment with Tailscale:
+#   - Set VIVINT_HUB_IP to your hub's Tailscale IP (or local IP if using subnet routing)
+#   - Make sure the VM is connected to your Tailscale network
+
+services:
+  security-guard:
+    build: .
+    container_name: vivint-security-guard
+    restart: unless-stopped
+
+    # Environment variables for credentials
+    # Option 1: Use .env file (recommended)
+    env_file:
+      - .env
+
+    # Option 2: Set directly (less secure, visible in process list)
+    # environment:
+    #   - VIVINT_USERNAME=your@email.com
+    #   - VIVINT_PASSWORD=yourpassword
+    #   - GEMINI_API_KEY=AIza...
+    #   - PUSHOVER_TOKEN=a1b2c3...
+    #   - PUSHOVER_USER=u1v2w3...
+    #   - VIVINT_HUB_IP=100.x.x.x  # Tailscale IP of your hub
+
+    # Persist data (optional - for any cached data)
+    volumes:
+      - security-guard-data:/app/data
+
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # Resource limits for e2-micro (1GB RAM, shared CPU)
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+
+volumes:
+  security-guard-data:

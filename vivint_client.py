@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Callable
@@ -18,9 +19,14 @@ import config
 
 _LOGGER = logging.getLogger(__name__)
 
+# Check if we're on Windows (for DPAPI support)
+_IS_WINDOWS = sys.platform == "win32"
+
 
 def _encrypt_data(data: bytes) -> bytes:
-    """Encrypt data using Windows DPAPI."""
+    """Encrypt data using Windows DPAPI (Windows only)."""
+    if not _IS_WINDOWS:
+        return data
     try:
         import win32crypt
         return win32crypt.CryptProtectData(data, None, None, None, None, 0)
@@ -30,7 +36,9 @@ def _encrypt_data(data: bytes) -> bytes:
 
 
 def _decrypt_data(data: bytes) -> bytes:
-    """Decrypt data using Windows DPAPI."""
+    """Decrypt data using Windows DPAPI (Windows only)."""
+    if not _IS_WINDOWS:
+        return data
     try:
         import win32crypt
         _, decrypted = win32crypt.CryptUnprotectData(data, None, None, None, 0)
@@ -43,11 +51,20 @@ def _decrypt_data(data: bytes) -> bytes:
 # Credentials file for all secure data
 CREDENTIALS_FILE = config.DATA_DIR / "credentials.enc"
 
+# Environment variable mappings for container deployment
+_ENV_CREDENTIAL_MAP = {
+    "username": "VIVINT_USERNAME",
+    "password": "VIVINT_PASSWORD",
+    "gemini_api_key": "GEMINI_API_KEY",
+    "pushover_token": "PUSHOVER_TOKEN",
+    "pushover_user": "PUSHOVER_USER",
+}
+
 
 def save_credentials(creds: dict) -> None:
-    """Save all credentials to encrypted file."""
+    """Save all credentials to encrypted file (Windows) or plain file (Linux)."""
     # Load existing and merge
-    existing = load_credentials() or {}
+    existing = _load_credentials_from_file() or {}
     existing.update(creds)
     data = json.dumps(existing).encode()
     encrypted = _encrypt_data(data)
@@ -55,8 +72,8 @@ def save_credentials(creds: dict) -> None:
     _LOGGER.info("Credentials saved")
 
 
-def load_credentials() -> dict | None:
-    """Load credentials from encrypted file."""
+def _load_credentials_from_file() -> dict | None:
+    """Load credentials from file only."""
     if not CREDENTIALS_FILE.exists():
         return None
     try:
@@ -64,13 +81,46 @@ def load_credentials() -> dict | None:
         decrypted = _decrypt_data(encrypted)
         return json.loads(decrypted.decode())
     except Exception as e:
-        _LOGGER.warning("Failed to load credentials: %s", e)
+        _LOGGER.warning("Failed to load credentials from file: %s", e)
         return None
 
 
+def load_credentials() -> dict | None:
+    """
+    Load credentials from environment variables (preferred) or encrypted file.
+
+    Environment variables take precedence for container deployments.
+    """
+    creds = {}
+
+    # First, try to load from file
+    file_creds = _load_credentials_from_file() or {}
+    creds.update(file_creds)
+
+    # Override with environment variables (for container deployment)
+    for cred_key, env_var in _ENV_CREDENTIAL_MAP.items():
+        env_value = os.environ.get(env_var)
+        if env_value:
+            creds[cred_key] = env_value
+
+    return creds if creds else None
+
+
 def get_stored_credential(key: str) -> str | None:
-    """Get a specific stored credential."""
-    creds = load_credentials()
+    """
+    Get a specific stored credential.
+
+    Checks environment variable first, then falls back to stored credentials.
+    """
+    # Check environment variable first
+    env_var = _ENV_CREDENTIAL_MAP.get(key)
+    if env_var:
+        env_value = os.environ.get(env_var)
+        if env_value:
+            return env_value
+
+    # Fall back to stored credentials
+    creds = _load_credentials_from_file()
     return creds.get(key) if creds else None
 
 
