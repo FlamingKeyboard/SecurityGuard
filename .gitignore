@@ -1,0 +1,29 @@
+# Credentials and sensitive data (encrypted but still exclude)
+data/
+*.enc
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+
+# vivintpy is a separate repo (git submodule or just cloned)
+vivintpy/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
