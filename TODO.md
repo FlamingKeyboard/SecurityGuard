@@ -10,9 +10,9 @@
 ## 1. Housekeeping
 
 ### 1.1 Commit Utility Scripts
-- [ ] Add `manual_sync.py` - Manual GCP sync trigger script
-- [ ] Add `query_bq.py` - BigQuery query utility
-- [ ] Add `test_gcs_upload.py` - GCS upload test script
+- [x] Add `manual_sync.py` - Manual GCP sync trigger script
+- [x] Add `query_bq.py` - BigQuery query utility
+- [x] Add `test_gcs_upload.py` - GCS upload test script
 - [ ] Clean up or commit documentation files (COMMAND_REFERENCE.md, DEPLOYMENT_SUMMARY.md, etc.)
 
 ---
@@ -20,14 +20,14 @@
 ## 2. Automation
 
 ### 2.1 Hourly GCP Sync
-- [ ] Create systemd timer for hourly sync to BigQuery and GCS
-- [ ] Timer runs `manual_sync.py` inside container
-- [ ] Log sync results
+- [x] Create systemd timer for hourly sync to BigQuery and GCS
+- [x] Timer runs `manual_sync.py` inside container
+- [x] Log sync results
 
 ### 2.2 Container Auto-Restart on VM Reboot
-- [ ] Enable podman systemd integration
-- [ ] Generate systemd unit for security-guard container
-- [ ] Enable unit to start on boot
+- [~] Enable podman systemd integration
+- [~] Generate systemd unit for security-guard container
+- [~] Enable unit to start on boot
 
 ### 2.3 Smart Container Auto-Update from Git
 **Requirements:**
@@ -38,67 +38,79 @@
 - Graceful container restart
 
 **Implementation:**
-- [ ] Create `/opt/security-guard/update-container.sh` script
-- [ ] Script checks `git fetch && git diff HEAD origin/main`
-- [ ] Only rebuild if changes detected
-- [ ] Use `podman-compose pull && podman-compose up -d` for minimal downtime
-- [ ] Log all update activities
+- [x] Create `/opt/security-guard/update-container.sh` script
+- [x] Script checks `git fetch && git diff HEAD origin/main`
+- [x] Only rebuild if changes detected
+- [x] Use `podman-compose pull && podman-compose up -d` for minimal downtime
+- [x] Log all update activities
+- [x] Automatic rollback on health check failure
+- [x] Pushover notifications on update success/failure
 
 ### 2.4 Weekly VM & Container Updates (Sunday Evening)
-- [ ] Create systemd timer for Sunday 8 PM local time
-- [ ] Update VM packages (`dnf update -y`)
-- [ ] Pull latest container code and rebuild if needed
-- [ ] Reboot VM if kernel updated
-- [ ] Log all activities
+- [x] Create systemd timer for Sunday 8 PM local time
+- [x] Update VM packages (`dnf update -y`)
+- [x] Pull latest container code and rebuild if needed
+- [x] Reboot VM if kernel updated
+- [x] Log all activities
 
 ---
 
 ## 3. Monitoring & Health Checks
 
 ### 3.1 Container Health Check Endpoint
-Create `/health` endpoint that checks ALL services:
+Created `/health` endpoint in `health_check.py` that checks ALL services:
 
 **External Services:**
-- [ ] Vivint API connectivity (can reach api.vivint.com)
-- [ ] GCP BigQuery connectivity (can query dataset)
-- [ ] GCP Cloud Storage connectivity (can list bucket)
-- [ ] Google AI Studio / Gemini API connectivity
-- [ ] Pushover API connectivity
-- [ ] Vivint Hub/Panel reachability (local network RTSP)
+- [x] Vivint API connectivity (can reach api.vivint.com)
+- [x] GCP BigQuery connectivity (can query dataset)
+- [x] GCP Cloud Storage connectivity (can list bucket)
+- [x] Google AI Studio / Gemini API connectivity
+- [x] Pushover API connectivity
+- [x] Vivint Hub/Panel reachability (local network RTSP)
 
 **Internal Checks:**
-- [ ] PubNub subscription active
-- [ ] SQLite buffer accessible
-- [ ] Frame capture directory writable
-- [ ] Token file valid/not expired
+- [x] SQLite buffer accessible
+- [x] Frame capture directory writable
+- [x] Token file valid/not expired
+- [x] Memory usage tracking
 
 **Error Detection:**
-- [ ] Track HTTP status codes 400-599 from any service
-- [ ] Track authentication errors from any service
-- [ ] Track Python exceptions/errors in execution
-- [ ] Track rate limiting from any API
+- [x] Track HTTP status codes 400-599 from any service
+- [x] Track authentication errors from any service
+- [x] Track Python exceptions/errors in execution
+- [x] Track rate limiting from any API
+
+**Endpoints:**
+- `/health` - Full status JSON with all checks
+- `/health/ready` - Readiness probe (hub + Gemini)
+- `/health/live` - Liveness probe (always 200)
 
 ### 3.2 Podman Healthcheck Configuration
-- [ ] Add HEALTHCHECK to Dockerfile
-- [ ] Configure healthcheck interval (30s)
-- [ ] Configure healthcheck timeout (10s)
-- [ ] Configure unhealthy threshold (3 failures)
-- [ ] Update docker-compose.yml with healthcheck settings
+- [x] Add HEALTHCHECK to Dockerfile (uses /health/live)
+- [x] Configure healthcheck interval (30s)
+- [x] Configure healthcheck timeout (10s)
+- [x] Configure unhealthy threshold (3 failures)
+- [x] Update compose-rocky.yaml with healthcheck settings
+- [x] Added curl to container for health checks
 
 ### 3.3 VM Resource Monitoring
-- [ ] Monitor disk space (alert if < 5GB free)
-- [ ] Monitor CPU usage (alert if sustained > 90%)
-- [ ] Monitor memory usage (alert if sustained > 90%)
-- [ ] Create monitoring script that runs via cron/systemd timer
-- [ ] Send alerts via Pushover when thresholds exceeded
+Created `scripts/vm_monitor.py`:
+- [x] Monitor disk space (alert if < 5GB free)
+- [x] Monitor CPU usage (alert if sustained > 90%)
+- [x] Monitor memory usage (alert if sustained > 90%)
+- [x] Create monitoring script that runs via systemd timer (every 5 min)
+- [x] Send alerts via Pushover when thresholds exceeded
+- [x] Alert cooldown (1 hour between same alerts)
+- [x] Check container running status
+- [x] Check container health endpoint
 
 ### 3.4 Alerting Configuration
-- [ ] Alert on container health check failures
-- [ ] Alert on container restart/crash
-- [ ] Alert on GCP sync failures
-- [ ] Alert on VM resource threshold breaches
+- [x] Alert on container health check failures (via vm_monitor.py)
+- [x] Alert on container restart/crash (via vm_monitor.py)
+- [x] Alert on GCP sync failures (via update-container.sh)
+- [x] Alert on VM resource threshold breaches (via vm_monitor.py)
 - [ ] Alert if no events received for extended period (optional)
-- [ ] All alerts go through Pushover
+- [x] All alerts go through Pushover
 
 ### 3.5 GCP-Side Monitoring
 - [ ] Set up Cloud Monitoring alert if no logs received for 1 hour
@@ -153,24 +165,36 @@ Create `/health` endpoint that checks ALL services:
 - [ ] Test VM resource alerts
 
 ### 5.3 Integration Test
-- [ ] Full end-to-end test: motion -> analysis -> notification -> sync -> query
+- [x] Full end-to-end test: motion -> analysis -> notification -> sync -> query (tested previously)
+
+---
+
+## 6. Current Deployment Status
+
+### 6.1 VM Deployment (In Progress)
+- [x] Changes committed and pushed to GitHub
+- [~] Rebuilding container with new health check endpoint
+- [ ] Install systemd services on VM
+- [ ] Start container and verify health endpoint
+- [ ] Verify all timers are active
 
 ---
 
 ## Implementation Order
 
-1. **Phase 1: Housekeeping** (commit scripts)
-2. **Phase 2: Health Check Endpoint** (needed for monitoring)
-3. **Phase 3: Automation Scripts** (sync timer, auto-restart, auto-update)
-4. **Phase 4: VM Monitoring** (resource checks, alerts)
-5. **Phase 5: Podman Integration** (healthcheck, systemd)
-6. **Phase 6: Testing & Verification**
+1. **Phase 1: Housekeeping** (commit scripts) - DONE
+2. **Phase 2: Health Check Endpoint** (needed for monitoring) - DONE
+3. **Phase 3: Automation Scripts** (sync timer, auto-restart, auto-update) - DONE
+4. **Phase 4: VM Monitoring** (resource checks, alerts) - DONE
+5. **Phase 5: Podman Integration** (healthcheck, systemd) - IN PROGRESS
+6. **Phase 6: Testing & Verification** - PENDING
 
 ---
 
 ## Notes
 
-- VM IP: Accessible via Tailscale at `security-guard-vm`
+- VM Instance: `instance-20260106-210917` (us-central1-a)
 - Container runs with `network_mode: host` for GCP metadata access
 - All secrets via environment variables (no hardcoded credentials)
 - Pushover used for all alerting (already configured)
+- Health check server runs on port 8080
