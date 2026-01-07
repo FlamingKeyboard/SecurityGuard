@@ -81,75 +81,68 @@ def get_container_status():
     container_name = "vivint-security-guard"
 
     try:
-        # Check if container is running
+        # Use podman ps to get status and uptime directly
         result = subprocess.run(
-            ["podman", "inspect", container_name, "--format",
-             "{{.State.Status}}|{{.State.Running}}|{{.State.StartedAt}}|{{.State.Health.Status}}"],
+            ["podman", "ps", "-a", "--filter", f"name={container_name}",
+             "--format", "{{.Names}}|{{.Status}}|{{.RunningFor}}"],
             capture_output=True,
             text=True,
             timeout=10
         )
 
-        if result.returncode != 0:
+        if result.returncode != 0 or not result.stdout.strip():
             return {
                 "name": container_name,
                 "exists": False,
-                "error": result.stderr.strip()
+                "error": result.stderr.strip() or "Container not found"
             }
 
         parts = result.stdout.strip().split("|")
-        status = parts[0] if len(parts) > 0 else "unknown"
-        running = parts[1].lower() == "true" if len(parts) > 1 else False
-        started_at = parts[2] if len(parts) > 2 else ""
-        health = parts[3] if len(parts) > 3 else "unknown"
+        name = parts[0] if len(parts) > 0 else container_name
+        status_str = parts[1] if len(parts) > 1 else "unknown"
+        running_for = parts[2] if len(parts) > 2 else ""
 
-        # Calculate uptime
+        # Parse status string like "Up 47 minutes (healthy)" or "Exited (0) 2 hours ago"
+        running = status_str.lower().startswith("up ")
+        health = "unknown"
+        if "(healthy)" in status_str:
+            health = "healthy"
+        elif "(unhealthy)" in status_str:
+            health = "unhealthy"
+        elif "(starting)" in status_str:
+            health = "starting"
+
+        # Parse uptime from RunningFor like "47 minutes ago" or "2 hours ago"
+        uptime_str = running_for.replace(" ago", "") if running_for else "unknown"
+
+        # Convert to seconds for metrics
         uptime_seconds = 0
-        if running and started_at:
-            try:
-                # Podman format: "2026-01-07 12:29:38.493934142 +0000 UTC"
-                # Need to parse this non-standard format
-                import re
-                # Remove UTC suffix and extra precision
-                clean_ts = re.sub(r'\.\d+', '', started_at)  # Remove nanoseconds
-                clean_ts = clean_ts.replace(" UTC", "").replace(" +0000", "+00:00")
-                started = datetime.fromisoformat(clean_ts)
-                uptime_seconds = int((datetime.now(timezone.utc) - started).total_seconds())
-            except Exception:
-                # Fallback: try parsing with subprocess
-                try:
-                    result = subprocess.run(
-                        ["podman", "inspect", container_name, "--format", "{{.State.StartedAt}}"],
-                        capture_output=True, text=True, timeout=5
-                    )
-                    # Just calculate from container create time
-                    pass
-                except Exception:
-                    pass
-
-        # Format uptime as human readable
-        if uptime_seconds > 0:
-            days = uptime_seconds // 86400
-            hours = (uptime_seconds % 86400) // 3600
-            minutes = (uptime_seconds % 3600) // 60
-            if days > 0:
-                uptime_str = f"{days}d {hours}h {minutes}m"
-            elif hours > 0:
-                uptime_str = f"{hours}h {minutes}m"
-            else:
-                uptime_str = f"{minutes}m"
-        else:
-            uptime_str = "0m"
+        if running_for:
+            import re
+            # Parse patterns like "47 minutes", "2 hours", "3 days"
+            match = re.search(r'(\d+)\s*(second|minute|hour|day|week|month)', running_for.lower())
+            if match:
+                value = int(match.group(1))
+                unit = match.group(2)
+                multipliers = {
+                    'second': 1,
+                    'minute': 60,
+                    'hour': 3600,
+                    'day': 86400,
+                    'week': 604800,
+                    'month': 2592000,
+                }
+                uptime_seconds = value * multipliers.get(unit, 0)
 
         return {
-            "name": container_name,
+            "name": name,
             "exists": True,
-            "status": status,
+            "status": "running" if running else "stopped",
             "running": running,
             "health": health,
-            "uptime_seconds": uptime_seconds,
             "uptime": uptime_str,
-            "started_at": started_at,
+            "uptime_seconds": uptime_seconds,
+            "status_detail": status_str,
         }
 
     except subprocess.TimeoutExpired:
