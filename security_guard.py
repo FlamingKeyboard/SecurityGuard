@@ -34,6 +34,16 @@ from pathlib import Path
 import aiohttp
 
 import config
+
+# Cloud Logging for heartbeat monitoring
+_cloud_logger = None
+try:
+    from google.cloud import logging as cloud_logging
+    if config.GCP_PROJECT_ID:
+        _logging_client = cloud_logging.Client(project=config.GCP_PROJECT_ID)
+        _cloud_logger = _logging_client.logger("security-guard-heartbeat")
+except Exception:
+    pass  # Cloud Logging optional
 from gcp_logging import (
     get_or_create_event_id,
     get_or_create_conversation_id,
@@ -350,6 +360,7 @@ class SecurityGuard:
         asyncio.create_task(self._keepalive_loop())
         asyncio.create_task(self._cleanup_loop())
         asyncio.create_task(self._sync_loop())
+        asyncio.create_task(self._heartbeat_loop())
 
         _LOGGER.info("Security Guard service started")
         _LOGGER.info("Monitoring %d cameras", len(self.client.cameras))
@@ -547,6 +558,60 @@ class SecurityGuard:
                 except Exception as e:
                     _LOGGER.error("GCP sync failed: %s", e)
 
+    async def _heartbeat_loop(self) -> None:
+        """Send periodic heartbeat to Cloud Logging with service health."""
+        # Heartbeat interval: 5 minutes
+        heartbeat_interval = 300
+
+        while self._running:
+            await asyncio.sleep(heartbeat_interval)
+            if self._running and _cloud_logger:
+                try:
+                    # Gather health information
+                    from health_check import get_error_counts
+                    import aiohttp
+
+                    # Get health status
+                    health_data = {
+                        "service": "security-guard",
+                        "status": "running",
+                        "cameras_monitored": len(self.client.cameras) if self.client else 0,
+                        "camera_names": [c.name for c in self.client.cameras] if self.client else [],
+                        "errors": get_error_counts(),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+
+                    # Check external services (quick connectivity test)
+                    try:
+                        async with aiohttp.ClientSession() as session:
+                            async with session.get(
+                                "http://localhost:8080/health",
+                                timeout=aiohttp.ClientTimeout(total=5)
+                            ) as resp:
+                                if resp.status == 200:
+                                    health_response = await resp.json()
+                                    health_data["health_status"] = health_response.get("status", "unknown")
+                                    health_data["checks"] = {
+                                        k: v.get("status") if isinstance(v, dict) else "ok"
+                                        for k, v in health_response.get("checks", {}).items()
+                                        if isinstance(v, dict)
+                                    }
+                    except Exception:
+                        health_data["health_status"] = "unknown"
+
+                    # Send to Cloud Logging
+                    _cloud_logger.log_struct(
+                        health_data,
+                        severity="INFO",
+                        labels={
+                            "service": "security-guard",
+                            "type": "heartbeat",
+                        }
+                    )
+                    _LOGGER.debug("Heartbeat sent to Cloud Logging")
+                except Exception as e:
+                    _LOGGER.warning("Failed to send heartbeat: %s", e)
+
 
 async def main():
     """Main entry point."""
@@ -622,6 +687,12 @@ async def main():
             print(f"    Error: {gcp_status.get('bigquery', (False, 'Unknown'))[1]}")
     else:
         print("GCP integration: DISABLED (local storage only)")
+
+    # Cloud Logging heartbeat status
+    if _cloud_logger:
+        print("Cloud Logging heartbeat: ENABLED (every 5 min)")
+    else:
+        print("Cloud Logging heartbeat: DISABLED")
 
     print("Health check: http://localhost:8080/health")
     print("Press Ctrl+C to stop.")
