@@ -2,7 +2,11 @@
 #
 # GCE VM Setup Script for Vivint Security Guard
 #
-# Run this on a fresh e2-micro instance (Debian/Ubuntu):
+# Supports:
+#   - Rocky Linux (uses dnf)
+#   - Debian/Ubuntu (uses apt-get)
+#
+# Run this on a fresh e2-micro instance:
 #   curl -sSL https://raw.githubusercontent.com/<user>/<repo>/main/scripts/setup-gce.sh | bash
 #
 # Or manually:
@@ -13,10 +17,29 @@ set -e
 
 echo "=== Vivint Security Guard - GCE Setup ==="
 
-# Install Podman
+# Detect OS and install packages accordingly
+install_packages() {
+    if [ -f /etc/rocky-release ] || [ -f /etc/redhat-release ]; then
+        echo "Detected Rocky Linux / RHEL..."
+        echo "Installing Podman and dependencies via dnf..."
+        sudo dnf install -y podman git python3-pip curl
+        # podman-compose is not in Rocky Linux repos, install via pip
+        echo "Installing podman-compose via pip3..."
+        sudo pip3 install podman-compose
+    elif [ -f /etc/debian_version ]; then
+        echo "Detected Debian/Ubuntu..."
+        echo "Installing Podman and dependencies via apt..."
+        sudo apt-get update
+        sudo apt-get install -y podman podman-compose git curl
+    else
+        echo "ERROR: Unsupported OS. This script supports Rocky Linux and Debian/Ubuntu."
+        echo "Please install podman, podman-compose, and git manually."
+        exit 1
+    fi
+}
+
 echo "Installing Podman..."
-sudo apt-get update
-sudo apt-get install -y podman podman-compose git
+install_packages
 
 # Install Tailscale (if not already installed)
 if ! command -v tailscale &> /dev/null; then
@@ -47,11 +70,13 @@ if [ ! -d "vivintpy" ]; then
     git clone --depth 1 https://github.com/natekspencer/vivintpy.git
 fi
 
-# Create .env file
+# Create .env file with secure permissions
 if [ ! -f .env ]; then
     echo ""
     echo "Creating .env file from template..."
     cp env.example .env
+    # Secure the .env file - contains credentials
+    chmod 600 .env
     echo ""
     echo "=== IMPORTANT ==="
     echo "Edit .env with your credentials:"
@@ -64,6 +89,9 @@ if [ ! -f .env ]; then
     echo "  - PUSHOVER_TOKEN"
     echo "  - PUSHOVER_USER"
     echo "  - VIVINT_HUB_IP (your hub's Tailscale IP)"
+else
+    # Ensure existing .env has secure permissions
+    chmod 600 .env
 fi
 
 # Create log directory

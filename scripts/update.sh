@@ -6,6 +6,7 @@
 #   1. Pulls the latest code from git
 #   2. Rebuilds the container if changes detected
 #   3. Restarts the service
+#   4. Rolls back on failure
 #
 # Setup (on your GCE VM):
 #   1. Clone the repo: git clone <your-repo-url> /opt/security-guard
@@ -16,10 +17,24 @@
 
 set -e
 
+# PATH export for cron environment (cron has minimal PATH)
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
 # Configuration
 REPO_DIR="${REPO_DIR:-/opt/security-guard}"
 COMPOSE_CMD="${COMPOSE_CMD:-podman-compose}"  # or docker-compose
 LOG_FILE="${LOG_FILE:-/var/log/security-guard-update.log}"
+LOCK_FILE="${LOCK_FILE:-/var/run/security-guard-update.lock}"
+
+# Ensure lock directory exists
+mkdir -p "$(dirname "$LOCK_FILE")"
+
+# Lock file mechanism - prevent concurrent runs
+exec 200>"$LOCK_FILE"
+if ! flock -n 200; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Update already running, exiting."
+    exit 0
+fi
 
 # Change to repo directory
 cd "$REPO_DIR"
@@ -28,6 +43,27 @@ cd "$REPO_DIR"
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }
+
+# Save current commit for rollback
+PREVIOUS_COMMIT=$(git rev-parse HEAD)
+
+# Rollback function - called on failure
+rollback() {
+    local exit_code=$?
+    if [ $exit_code -ne 0 ]; then
+        log "ERROR: Update failed with exit code $exit_code"
+        log "ROLLBACK: Reverting to previous commit $PREVIOUS_COMMIT"
+        git reset --hard "$PREVIOUS_COMMIT"
+        $COMPOSE_CMD up -d || true
+        log "ROLLBACK: Complete"
+    fi
+    # Release lock
+    flock -u 200
+    exit $exit_code
+}
+
+# Set trap for rollback on error
+trap rollback EXIT
 
 # Fetch latest changes
 log "Checking for updates..."
@@ -58,6 +94,19 @@ $COMPOSE_CMD up -d
 
 log "Update complete! Now running: $(git rev-parse --short HEAD)"
 
+# Verify service is running
+sleep 5
+if $COMPOSE_CMD ps | grep -q "Up"; then
+    log "Service verified running"
+else
+    log "WARNING: Service may not be running correctly"
+    $COMPOSE_CMD ps
+fi
+
 # Show recent logs
 log "Recent container logs:"
 $COMPOSE_CMD logs --tail=20
+
+# Success - disable trap's rollback behavior
+trap - EXIT
+flock -u 200
