@@ -1,0 +1,29 @@
+[Unit]
+Description=Vivint Security Guard Container
+Documentation=https://github.com/FlamingKeyboard/SecurityGuard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/security-guard
+ExecStart=/usr/local/bin/podman-compose up -d
+ExecStop=/usr/local/bin/podman-compose down
+ExecReload=/usr/local/bin/podman-compose restart
+User=gavin
+Group=gavin
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/security-guard /var/log
+
+# Restart policy
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target

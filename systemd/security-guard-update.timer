@@ -1,0 +1,25 @@
+[Unit]
+Description=Vivint Security Guard Auto-Update Timer
+Documentation=https://github.com/FlamingKeyboard/SecurityGuard
+After=network-online.target
+
+[Timer]
+# Run 5 minutes after boot
+OnBootSec=5min
+
+# Run every 15 minutes after the last activation
+OnUnitActiveSec=15min
+
+# Alternatively, use OnCalendar for specific times (commented examples):
+# OnCalendar=*:0/15  # Every 15 minutes (on the quarter hour)
+# OnCalendar=hourly  # Every hour
+# OnCalendar=daily   # Once per day at midnight
+
+# Ensure timer persists across reboots
+Persistent=true
+
+# Allow for some randomization to avoid thundering herd
+# RandomizedDelaySec=1min
+
+[Install]
+WantedBy=timers.target
