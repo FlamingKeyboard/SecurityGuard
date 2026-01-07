@@ -96,13 +96,6 @@ def _check_https_connectivity(host: str, timeout: float = 5.0) -> tuple[bool, fl
         return False, 0
 
 
-def _check_vivint_api() -> dict:
-    """Check Vivint API connectivity."""
-    ok, latency = _check_https_connectivity("api.vivint.com")
-    return {
-        "status": "ok" if ok else "error",
-        "latency_ms": round(latency) if ok else None,
-    }
 
 
 def _check_gemini_api() -> dict:
@@ -258,7 +251,7 @@ def _determine_overall_status(checks: dict) -> str:
     - degraded: Some non-critical services down
     - unhealthy: Critical services down
     """
-    critical_services = ["vivint_api", "vivint_hub", "gcs", "bigquery"]
+    critical_services = ["vivint_hub", "gcs", "bigquery"]
     non_critical_services = ["pushover", "gemini"]
 
     critical_failures = 0
@@ -285,7 +278,6 @@ def _determine_overall_status(checks: dict) -> str:
 async def health_handler(request: web.Request) -> web.Response:
     """Full health check endpoint."""
     checks = {
-        "vivint_api": _check_vivint_api(),
         "gemini": _check_gemini_api(),
         "pushover": _check_pushover_api(),
         "vivint_hub": _check_vivint_hub(),
