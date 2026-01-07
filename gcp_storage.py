@@ -4,11 +4,15 @@ import logging
 import os
 import shutil
 import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 import config
+
+# Timeout for GCP API calls (seconds)
+GCP_API_TIMEOUT = 15
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -360,12 +364,8 @@ def archive_old_images(
     return uploaded, deleted
 
 
-def test_gcs_connection() -> tuple[bool, str]:
-    """
-    Test GCS connectivity.
-
-    Returns (success, message).
-    """
+def _test_gcs_connection_impl() -> tuple[bool, str]:
+    """Internal implementation of GCS connection test."""
     if not config.GCP_PROJECT_ID and not config.GCP_SERVICE_ACCOUNT_FILE:
         return False, "GCP_PROJECT_ID or GCP_SERVICE_ACCOUNT_FILE not configured"
 
@@ -379,6 +379,22 @@ def test_gcs_connection() -> tuple[bool, str]:
 
         return True, f"Connected to bucket: {bucket.name}"
 
+    except Exception as e:
+        return False, f"GCS error: {e}"
+
+
+def test_gcs_connection() -> tuple[bool, str]:
+    """
+    Test GCS connectivity with timeout.
+
+    Returns (success, message).
+    """
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_test_gcs_connection_impl)
+            return future.result(timeout=GCP_API_TIMEOUT)
+    except FuturesTimeoutError:
+        return False, f"GCS connection timed out after {GCP_API_TIMEOUT}s"
     except Exception as e:
         return False, f"GCS error: {e}"
 

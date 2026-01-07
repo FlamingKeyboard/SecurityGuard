@@ -7,12 +7,16 @@ import os
 import sqlite3
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Any
 from dataclasses import dataclass, asdict
 
 import config
+
+# Timeout for GCP API calls (seconds)
+GCP_API_TIMEOUT = 15
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -647,12 +651,8 @@ async def run_sync() -> tuple[int, int, int]:
 # Testing
 # =============================================================================
 
-def test_bigquery_connection() -> tuple[bool, str]:
-    """
-    Test BigQuery connectivity.
-
-    Returns (success, message).
-    """
+def _test_bigquery_connection_impl() -> tuple[bool, str]:
+    """Internal implementation of BigQuery connection test."""
     if not config.GCP_PROJECT_ID and not config.GCP_SERVICE_ACCOUNT_FILE:
         return False, "GCP_PROJECT_ID or GCP_SERVICE_ACCOUNT_FILE not configured"
 
@@ -668,6 +668,22 @@ def test_bigquery_connection() -> tuple[bool, str]:
         else:
             return False, "Failed to create dataset/table"
 
+    except Exception as e:
+        return False, f"BigQuery error: {e}"
+
+
+def test_bigquery_connection() -> tuple[bool, str]:
+    """
+    Test BigQuery connectivity with timeout.
+
+    Returns (success, message).
+    """
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_test_bigquery_connection_impl)
+            return future.result(timeout=GCP_API_TIMEOUT)
+    except FuturesTimeoutError:
+        return False, f"BigQuery connection timed out after {GCP_API_TIMEOUT}s"
     except Exception as e:
         return False, f"BigQuery error: {e}"
 
