@@ -41,7 +41,7 @@
 - [x] Create `/opt/security-guard/update-container.sh` script
 - [x] Script checks `git fetch && git diff HEAD origin/main`
 - [x] Only rebuild if changes detected
-- [x] Use `podman-compose pull && podman-compose up -d` for minimal downtime
+- [x] Use `podman-compose down && podman-compose up -d` to ensure container recreation
 - [x] Log all update activities
 - [x] Automatic rollback on health check failure
 - [x] Pushover notifications on update success/failure

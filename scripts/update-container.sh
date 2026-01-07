@@ -15,7 +15,7 @@ INSTALL_DIR="/opt/security-guard"
 COMPOSE_FILE="compose-rocky.yaml"
 LOG_DIR="/var/log/security-guard"
 LOG_FILE="${LOG_DIR}/update.log"
-HEALTH_ENDPOINT="http://localhost:8000/health"
+HEALTH_ENDPOINT="http://localhost:8080/health"
 HEALTH_CHECK_RETRIES=3
 HEALTH_CHECK_WAIT=30
 CONTAINER_STARTUP_WAIT=30
@@ -143,9 +143,12 @@ rollback_to_commit() {
         if podman-compose -f "${COMPOSE_FILE}" build >> "${LOG_FILE}" 2>&1; then
             log_info "Build successful"
 
-            log_info "Restarting container..."
+            log_info "Stopping existing container..."
+            podman-compose -f "${COMPOSE_FILE}" down >> "${LOG_FILE}" 2>&1 || true
+
+            log_info "Starting container with rolled-back version..."
             if podman-compose -f "${COMPOSE_FILE}" up -d >> "${LOG_FILE}" 2>&1; then
-                log_info "Container restarted"
+                log_info "Container started"
 
                 if check_container_health "${HEALTH_CHECK_RETRIES}" "${CONTAINER_STARTUP_WAIT}"; then
                     log_success "Rollback successful - container is healthy"
@@ -250,8 +253,12 @@ main() {
 
     log_success "Container image built successfully"
 
-    # Deploy updated container (rolling restart)
-    log_info "Deploying updated container (rolling restart)..."
+    # Stop existing container before deploying new one
+    log_info "Stopping existing container..."
+    podman-compose -f "${COMPOSE_FILE}" down >> "${LOG_FILE}" 2>&1 || true
+
+    # Deploy updated container with new image
+    log_info "Deploying updated container..."
     if ! podman-compose -f "${COMPOSE_FILE}" up -d >> "${LOG_FILE}" 2>&1; then
         log_error "Failed to deploy updated container"
         send_pushover_notification \
