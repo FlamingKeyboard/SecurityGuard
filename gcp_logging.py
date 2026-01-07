@@ -7,7 +7,6 @@ import os
 import sqlite3
 import threading
 import uuid
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Any
@@ -20,9 +19,9 @@ GCP_API_TIMEOUT = 15
 
 _LOGGER = logging.getLogger(__name__)
 
-# Thread locks for global state
-_client_lock = threading.Lock()
-_id_lock = threading.Lock()
+# Thread locks for global state (RLock allows same thread to re-acquire)
+_client_lock = threading.RLock()
+_id_lock = threading.RLock()
 
 # BigQuery client (initialized lazily)
 _bq_client = None
@@ -324,18 +323,18 @@ def _ensure_dataset_and_table() -> bool:
         dataset_id = f"{project}.{config.BQ_DATASET}"
         table_id = f"{dataset_id}.{config.BQ_TABLE}"
 
-        # Create dataset if not exists
+        # Create dataset if not exists (with timeout)
         try:
-            client.get_dataset(dataset_id)
+            client.get_dataset(dataset_id, timeout=GCP_API_TIMEOUT)
         except NotFound:
             _LOGGER.info("Creating BigQuery dataset: %s", dataset_id)
             dataset = bigquery.Dataset(dataset_id)
             dataset.location = "US"
-            client.create_dataset(dataset)
+            client.create_dataset(dataset, timeout=GCP_API_TIMEOUT)
 
-        # Create table if not exists
+        # Create table if not exists (with timeout)
         try:
-            client.get_table(table_id)
+            client.get_table(table_id, timeout=GCP_API_TIMEOUT)
         except NotFound:
             _LOGGER.info("Creating BigQuery table: %s", table_id)
             schema = [bigquery.SchemaField(**field) for field in BQ_SCHEMA]
@@ -348,7 +347,7 @@ def _ensure_dataset_and_table() -> bool:
             )
             table.clustering_fields = ["EventId", "ConversationId"]
 
-            client.create_table(table)
+            client.create_table(table, timeout=GCP_API_TIMEOUT)
             _LOGGER.info("BigQuery table created with partitioning and clustering")
 
         return True
@@ -651,8 +650,12 @@ async def run_sync() -> tuple[int, int, int]:
 # Testing
 # =============================================================================
 
-def _test_bigquery_connection_impl() -> tuple[bool, str]:
-    """Internal implementation of BigQuery connection test."""
+def test_bigquery_connection() -> tuple[bool, str]:
+    """
+    Test BigQuery connectivity with timeout.
+
+    Returns (success, message).
+    """
     if not config.GCP_PROJECT_ID and not config.GCP_SERVICE_ACCOUNT_FILE:
         return False, "GCP_PROJECT_ID or GCP_SERVICE_ACCOUNT_FILE not configured"
 
@@ -668,22 +671,6 @@ def _test_bigquery_connection_impl() -> tuple[bool, str]:
         else:
             return False, "Failed to create dataset/table"
 
-    except Exception as e:
-        return False, f"BigQuery error: {e}"
-
-
-def test_bigquery_connection() -> tuple[bool, str]:
-    """
-    Test BigQuery connectivity with timeout.
-
-    Returns (success, message).
-    """
-    try:
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(_test_bigquery_connection_impl)
-            return future.result(timeout=GCP_API_TIMEOUT)
-    except FuturesTimeoutError:
-        return False, f"BigQuery connection timed out after {GCP_API_TIMEOUT}s"
     except Exception as e:
         return False, f"BigQuery error: {e}"
 

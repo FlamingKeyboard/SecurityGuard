@@ -4,7 +4,6 @@ import logging
 import os
 import shutil
 import threading
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -16,8 +15,8 @@ GCP_API_TIMEOUT = 15
 
 _LOGGER = logging.getLogger(__name__)
 
-# Thread lock for global state
-_client_lock = threading.Lock()
+# Thread lock for global state (RLock allows same thread to re-acquire)
+_client_lock = threading.RLock()
 
 # GCS client (initialized lazily, protected by _client_lock)
 _gcs_client = None
@@ -144,11 +143,11 @@ def _get_bucket():
         try:
             _bucket = client.bucket(bucket_name)
 
-            # Check if bucket exists, create if not
-            if not _bucket.exists():
+            # Check if bucket exists, create if not (with timeout)
+            if not _bucket.exists(timeout=GCP_API_TIMEOUT):
                 _LOGGER.info("Creating GCS bucket: %s", bucket_name)
                 try:
-                    _bucket = client.create_bucket(bucket_name, location="US")
+                    _bucket = client.create_bucket(bucket_name, location="US", timeout=GCP_API_TIMEOUT)
                     _LOGGER.info("GCS bucket created: %s", bucket_name)
                 except Exception as create_err:
                     # Bucket may have been created by another process
@@ -364,8 +363,12 @@ def archive_old_images(
     return uploaded, deleted
 
 
-def _test_gcs_connection_impl() -> tuple[bool, str]:
-    """Internal implementation of GCS connection test."""
+def test_gcs_connection() -> tuple[bool, str]:
+    """
+    Test GCS connectivity with timeout.
+
+    Returns (success, message).
+    """
     if not config.GCP_PROJECT_ID and not config.GCP_SERVICE_ACCOUNT_FILE:
         return False, "GCP_PROJECT_ID or GCP_SERVICE_ACCOUNT_FILE not configured"
 
@@ -374,27 +377,11 @@ def _test_gcs_connection_impl() -> tuple[bool, str]:
         if bucket is None:
             return False, "Failed to get/create bucket"
 
-        # Try to list blobs (limited to 1) to verify access
-        list(bucket.list_blobs(max_results=1))
+        # Try to list blobs (limited to 1) to verify access (with timeout)
+        list(bucket.list_blobs(max_results=1, timeout=GCP_API_TIMEOUT))
 
         return True, f"Connected to bucket: {bucket.name}"
 
-    except Exception as e:
-        return False, f"GCS error: {e}"
-
-
-def test_gcs_connection() -> tuple[bool, str]:
-    """
-    Test GCS connectivity with timeout.
-
-    Returns (success, message).
-    """
-    try:
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(_test_gcs_connection_impl)
-            return future.result(timeout=GCP_API_TIMEOUT)
-    except FuturesTimeoutError:
-        return False, f"GCS connection timed out after {GCP_API_TIMEOUT}s"
     except Exception as e:
         return False, f"GCS error: {e}"
 
