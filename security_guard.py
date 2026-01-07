@@ -115,8 +115,20 @@ def _print_connectivity_help(hub_ip: str) -> None:
 
 
 from vivint_client import VivintClient, load_credentials
-from frame_capture import capture_frames, cleanup_old_frames
-from gemini_analyzer import analyze_multiple_frames, SecurityAnalysis
+from frame_capture import (
+    capture_frames,
+    capture_with_fallback,
+    capture_multiple_cameras,
+    cleanup_old_frames,
+    CaptureResult,
+    MultiCameraCapture,
+)
+from gemini_analyzer import (
+    analyze_multiple_frames,
+    analyze_video,
+    analyze_multiple_videos,
+    SecurityAnalysis,
+)
 
 # Pushover credentials (loaded at startup)
 _pushover_token: str | None = None
@@ -340,6 +352,58 @@ class SecurityGuard:
         self._running = False
         self._event_queue: asyncio.Queue = asyncio.Queue()
 
+    def _get_cameras_to_capture(self, trigger_camera_name: str) -> dict[str, str]:
+        """
+        Get dict of camera names to RTSP URLs for multi-camera capture.
+
+        Returns URLs for the trigger camera plus any adjacent cameras
+        defined in config.CAMERA_ADJACENCY.
+
+        Args:
+            trigger_camera_name: Name of the camera that triggered the event
+
+        Returns:
+            Dict mapping camera names to RTSP URLs
+        """
+        camera_urls = {}
+
+        # Find the trigger camera
+        trigger_camera = None
+        for cam in self.client.cameras:
+            if cam.name == trigger_camera_name:
+                trigger_camera = cam
+                break
+
+        if not trigger_camera:
+            _LOGGER.warning("Trigger camera %s not found", trigger_camera_name)
+            return camera_urls
+
+        # Add trigger camera
+        trigger_url = self.client.get_rtsp_url(trigger_camera.id)
+        if trigger_url:
+            camera_urls[trigger_camera_name] = trigger_url
+
+        # Add adjacent cameras if multi-camera is enabled
+        if config.MULTI_CAMERA_ENABLED:
+            adjacent_names = config.CAMERA_ADJACENCY.get(trigger_camera_name, [])
+
+            for adj_name in adjacent_names:
+                # Respect max camera limit
+                if len(camera_urls) >= config.MAX_CONCURRENT_CAMERAS:
+                    _LOGGER.debug("Max concurrent cameras reached (%d)", config.MAX_CONCURRENT_CAMERAS)
+                    break
+
+                # Find the adjacent camera
+                for cam in self.client.cameras:
+                    if cam.name == adj_name:
+                        url = self.client.get_rtsp_url(cam.id)
+                        if url:
+                            camera_urls[adj_name] = url
+                            _LOGGER.debug("Added adjacent camera: %s", adj_name)
+                        break
+
+        return camera_urls
+
     async def start(self) -> bool:
         """Start the security guard service."""
         _LOGGER.info("Starting Security Guard service...")
@@ -414,52 +478,96 @@ class SecurityGuard:
 
         _LOGGER.debug("Event ID: %s, Conversation ID: %s", event_id, conversation_id)
 
-        # Get RTSP URL for this camera
-        rtsp_url = self.client.get_rtsp_url(camera.id)
-        if not rtsp_url:
-            _LOGGER.warning("No RTSP URL available for %s", camera.name)
-            return
-
-        # Capture frames
-        _LOGGER.info("Capturing frames from %s...", camera.name)
-        frames = await capture_frames(rtsp_url, camera.name)
-
-        if not frames:
-            _LOGGER.warning("No frames captured from %s", camera.name)
-            return
-
-        _LOGGER.info("Captured %d frames, analyzing...", len(frames))
-
-        # Upload frames to GCS and collect URIs
-        image_uris = []
-        for i, frame_path in enumerate(frames):
-            uri = upload_image(
-                local_path=frame_path,
-                camera_name=camera.name,
-                event_id=event_id,
-                timestamp=event_timestamp,
-                frame_index=i,
-            )
-            if uri is None:
-                _LOGGER.warning(
-                    "Failed to upload frame %d for camera %s (event_id=%s)",
-                    i, camera.name, event_id
-                )
-            image_uris.append(uri)  # May be None if upload failed
-
-        # Analyze with Gemini (passing event/conversation IDs for logging)
-        analysis = await analyze_multiple_frames(
-            frames,
-            camera_name=camera.name,
-            event_type=event_type,
-            event_id=event_id,
-            conversation_id=conversation_id,
-            image_uris=image_uris,
+        # Determine capture mode
+        use_multi_camera = (
+            config.VIDEO_CAPTURE_ENABLED and
+            config.MULTI_CAMERA_ENABLED
         )
 
-        # Use first frame as the notification image
-        image_path = frames[0] if frames else None
+        if use_multi_camera:
+            # Multi-camera video capture
+            camera_urls = self._get_cameras_to_capture(camera.name)
 
+            if not camera_urls:
+                _LOGGER.warning("No camera URLs available for %s", camera.name)
+                return
+
+            _LOGGER.info("Multi-camera capture: %s", list(camera_urls.keys()))
+
+            # Capture from all cameras simultaneously
+            multi_capture = await capture_multiple_cameras(
+                camera_urls,
+                primary_camera=camera.name,
+            )
+
+            if not multi_capture.success:
+                _LOGGER.warning("Multi-camera capture failed: %s", multi_capture.error)
+                # Fall back to single camera
+                rtsp_url = self.client.get_rtsp_url(camera.id)
+                if rtsp_url:
+                    capture_result = await capture_with_fallback(rtsp_url, camera.name)
+                    if capture_result.success:
+                        # Use single video analysis
+                        analysis, image_path = await self._analyze_single_capture(
+                            capture_result, camera.name, event_type,
+                            event_id, conversation_id, event_timestamp
+                        )
+                    else:
+                        return
+                else:
+                    return
+            else:
+                # Upload all videos to GCS
+                video_uris = {}
+                for cam_name, video_path in multi_capture.videos.items():
+                    uri = upload_image(
+                        local_path=video_path,
+                        camera_name=cam_name,
+                        event_id=event_id,
+                        timestamp=event_timestamp,
+                        frame_index=0,
+                    )
+                    if uri:
+                        video_uris[cam_name] = uri
+
+                # Analyze all videos together
+                _LOGGER.info("Analyzing %d videos with Gemini...", len(multi_capture.videos))
+                analysis = await analyze_multiple_videos(
+                    video_paths=multi_capture.videos,
+                    primary_camera=camera.name,
+                    event_type=event_type,
+                    event_id=event_id,
+                    conversation_id=conversation_id,
+                    video_uris=video_uris,
+                )
+
+                # Extract frame from primary camera video for notification
+                primary_video = multi_capture.videos.get(camera.name)
+                if primary_video:
+                    image_path = await self._extract_frame_from_video(primary_video)
+                else:
+                    image_path = None
+
+        else:
+            # Single camera capture (original flow)
+            rtsp_url = self.client.get_rtsp_url(camera.id)
+            if not rtsp_url:
+                _LOGGER.warning("No RTSP URL available for %s", camera.name)
+                return
+
+            _LOGGER.info("Capturing from %s...", camera.name)
+            capture_result = await capture_with_fallback(rtsp_url, camera.name)
+
+            if not capture_result.success:
+                _LOGGER.warning("Capture failed for %s: %s", camera.name, capture_result.error)
+                return
+
+            analysis, image_path = await self._analyze_single_capture(
+                capture_result, camera.name, event_type,
+                event_id, conversation_id, event_timestamp
+            )
+
+        # Rest of the notification logic continues below...
         if not analysis:
             _LOGGER.warning("Analysis failed for %s, sending raw notification", camera.name)
             await send_notification(
@@ -500,13 +608,6 @@ class SecurityGuard:
             # Add CRITICAL prefix for emergency situations
             if analysis.risk_tier == "critical":
                 title = f"🆘 CRITICAL: {camera.name}"
-                # NOTE (2026-01): We intentionally DO NOT auto-trigger the Vivint
-                # alarm here, even for critical threats. Triggering the alarm may
-                # cause automatic 911 dispatch. Until the AI detection system has
-                # been thoroughly tested and proven reliable, all alarm triggering
-                # must require explicit human confirmation via the Vivint app.
-                # False-positive 911 calls are unacceptable during testing.
-                # See also: vivintpy/devices/alarm_panel.py:trigger_alarm()
 
             notification = format_notification(camera.name, analysis)
             await send_notification(
@@ -515,6 +616,105 @@ class SecurityGuard:
                 priority=priority,
                 image_path=image_path,
             )
+
+    async def _analyze_single_capture(
+        self,
+        capture_result: CaptureResult,
+        camera_name: str,
+        event_type: str,
+        event_id: str,
+        conversation_id: str,
+        event_timestamp,
+    ) -> tuple[SecurityAnalysis | None, Path | None]:
+        """Analyze a single camera capture (video or frames)."""
+
+        if capture_result.is_video and capture_result.video_path:
+            _LOGGER.info("Captured video, analyzing with Gemini...")
+
+            # Upload video to GCS
+            video_uri = upload_image(
+                local_path=capture_result.video_path,
+                camera_name=camera_name,
+                event_id=event_id,
+                timestamp=event_timestamp,
+                frame_index=0,
+            )
+
+            # Analyze video with Gemini
+            analysis = await analyze_video(
+                capture_result.video_path,
+                camera_name=camera_name,
+                event_type=event_type,
+                event_id=event_id,
+                conversation_id=conversation_id,
+                video_uri=video_uri,
+            )
+
+            # Extract frame for notification
+            image_path = await self._extract_frame_from_video(capture_result.video_path)
+
+            return analysis, image_path
+
+        else:
+            # Frame-based capture
+            frames = capture_result.frame_paths
+            _LOGGER.info("Captured %d frames, analyzing...", len(frames))
+
+            # Upload frames to GCS
+            image_uris = []
+            for i, frame_path in enumerate(frames):
+                uri = upload_image(
+                    local_path=frame_path,
+                    camera_name=camera_name,
+                    event_id=event_id,
+                    timestamp=event_timestamp,
+                    frame_index=i,
+                )
+                image_uris.append(uri)
+
+            # Analyze with Gemini
+            analysis = await analyze_multiple_frames(
+                frames,
+                camera_name=camera_name,
+                event_type=event_type,
+                event_id=event_id,
+                conversation_id=conversation_id,
+                image_uris=image_uris,
+            )
+
+            # Use first frame as the notification image
+            image_path = frames[0] if frames else None
+
+            return analysis, image_path
+
+    async def _extract_frame_from_video(self, video_path: Path) -> Path | None:
+        """Extract a single frame from a video for notification image."""
+        try:
+            frame_path = video_path.with_suffix(".jpg")
+            cmd = [
+                "ffmpeg",
+                "-i", str(video_path),
+                "-ss", "1",  # 1 second into the video
+                "-frames:v", "1",
+                "-q:v", "2",
+                "-y",
+                str(frame_path),
+            ]
+
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+
+            await asyncio.wait_for(process.communicate(), timeout=10)
+
+            if frame_path.exists():
+                return frame_path
+        except Exception as e:
+            _LOGGER.warning("Failed to extract frame from video: %s", e)
+
+        return None
 
     async def _keepalive_loop(self) -> None:
         """Periodically refresh the session to keep PubNub alive."""
@@ -569,7 +769,6 @@ class SecurityGuard:
                 try:
                     # Gather health information
                     from health_check import get_error_counts
-                    import aiohttp
 
                     # Get health status
                     health_data = {

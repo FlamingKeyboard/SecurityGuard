@@ -25,6 +25,30 @@ FRAME_CAPTURE_DIR.mkdir(exist_ok=True)
 FRAME_BURST_COUNT = 3  # Number of frames to capture per event
 FRAME_BURST_INTERVAL_MS = 500  # Interval between burst frames
 
+# Video capture settings (experimental - for better AI context)
+VIDEO_CAPTURE_ENABLED = os.getenv("VIDEO_CAPTURE_ENABLED", "false").lower() == "true"
+VIDEO_CAPTURE_DURATION_SECONDS = int(os.getenv("VIDEO_CAPTURE_DURATION", "3"))
+VIDEO_FALLBACK_TO_FRAMES = True  # Fall back to frame capture if video fails
+
+# Multi-camera capture settings
+# When enabled, captures video from adjacent cameras for full context
+# e.g., "Person detected on driveway" also captures doorbell and backyard
+MULTI_CAMERA_ENABLED = os.getenv("MULTI_CAMERA_ENABLED", "false").lower() == "true"
+
+# Camera adjacency map: which cameras to also capture when one triggers
+# Format: { camera_name: [adjacent_camera_names] }
+# Camera names must match exactly as reported by Vivint
+# Update these names to match your actual camera names from Vivint
+CAMERA_ADJACENCY = {
+    "Doorbell": ["Driveway"],
+    "Driveway": ["Doorbell", "Backyard"],
+    "Backyard": ["Driveway"],
+}
+
+# Maximum cameras to capture simultaneously (including trigger camera)
+# Set lower on resource-constrained VMs
+MAX_CONCURRENT_CAMERAS = int(os.getenv("MAX_CONCURRENT_CAMERAS", "3"))
+
 # RTSP settings
 RTSP_TIMEOUT_SECONDS = 30  # Increased for slower connections
 RTSP_PREFER_HD = False  # SD is faster and more reliable for analysis
