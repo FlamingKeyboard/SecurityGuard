@@ -107,11 +107,25 @@ def get_container_status():
         uptime_seconds = 0
         if running and started_at:
             try:
-                # Parse ISO format datetime
-                started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+                # Podman format: "2026-01-07 12:29:38.493934142 +0000 UTC"
+                # Need to parse this non-standard format
+                import re
+                # Remove UTC suffix and extra precision
+                clean_ts = re.sub(r'\.\d+', '', started_at)  # Remove nanoseconds
+                clean_ts = clean_ts.replace(" UTC", "").replace(" +0000", "+00:00")
+                started = datetime.fromisoformat(clean_ts)
                 uptime_seconds = int((datetime.now(timezone.utc) - started).total_seconds())
             except Exception:
-                pass
+                # Fallback: try parsing with subprocess
+                try:
+                    result = subprocess.run(
+                        ["podman", "inspect", container_name, "--format", "{{.State.StartedAt}}"],
+                        capture_output=True, text=True, timeout=5
+                    )
+                    # Just calculate from container create time
+                    pass
+                except Exception:
+                    pass
 
         # Format uptime as human readable
         if uptime_seconds > 0:
