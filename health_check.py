@@ -207,15 +207,20 @@ def _check_frame_dir() -> dict:
         }
 
 
-def _check_token_file() -> dict:
-    """Check if token file exists."""
+def _check_credentials_file() -> dict:
+    """Check if credentials file exists with refresh token."""
     try:
-        token_path = config.TOKEN_FILE
-        exists = token_path.exists()
+        from vivint_client import CREDENTIALS_FILE, load_credentials
+        exists = CREDENTIALS_FILE.exists()
+        has_token = False
+        if exists:
+            creds = load_credentials()
+            has_token = bool(creds and creds.get("refresh_token"))
         return {
-            "status": "ok" if exists else "warning",
-            "path": str(token_path),
+            "status": "ok" if has_token else "warning",
+            "path": str(CREDENTIALS_FILE),
             "exists": exists,
+            "has_refresh_token": has_token,
         }
     except Exception as e:
         return {
@@ -283,7 +288,7 @@ async def health_handler(request: web.Request) -> web.Response:
         "vivint_hub": _check_vivint_hub(),
         "sqlite": _check_sqlite(),
         "frame_dir": _check_frame_dir(),
-        "token_file": _check_token_file(),
+        "credentials": _check_credentials_file(),
         "memory_mb": _get_memory_usage(),
     }
 
