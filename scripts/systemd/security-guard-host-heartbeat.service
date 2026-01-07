@@ -1,0 +1,14 @@
+[Unit]
+Description=Security Guard Host Heartbeat
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/security-guard/scripts/cloud_heartbeat.py
+Environment=GCP_PROJECT_ID=gen-lang-client-0027906266
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
