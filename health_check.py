@@ -179,8 +179,7 @@ def _check_bigquery() -> dict:
 def _check_sqlite() -> dict:
     """Check SQLite buffer accessibility."""
     try:
-        from gcp_logging import BUFFER_DB_PATH
-        db_path = Path(BUFFER_DB_PATH)
+        db_path = config.SQLITE_BUFFER_FILE
         exists = db_path.exists()
         readable = os.access(db_path, os.R_OK) if exists else False
         return {
