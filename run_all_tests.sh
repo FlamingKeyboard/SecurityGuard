@@ -163,24 +163,24 @@ for test in "${TESTS[@]}"; do
     status="${TEST_RESULTS[$test]:-UNKNOWN}"
     duration="${TEST_DURATIONS[$test]:-0}"
 
-    ((total++))
+    total=$((total + 1))
 
     case "$status" in
         "PASS")
             printf "%-30s ${GREEN}%-10s${NC} %-10s\n" "$test" "$status" "${duration}s"
-            ((passed++))
+            passed=$((passed + 1))
             ;;
         "FAIL")
             printf "%-30s ${RED}%-10s${NC} %-10s\n" "$test" "$status" "${duration}s"
-            ((failed++))
+            failed=$((failed + 1))
             ;;
         "SKIP")
             printf "%-30s ${YELLOW}%-10s${NC} %-10s\n" "$test" "$status" "N/A"
-            ((skipped++))
+            skipped=$((skipped + 1))
             ;;
         *)
             printf "%-30s ${YELLOW}%-10s${NC} %-10s\n" "$test" "UNKNOWN" "N/A"
-            ((skipped++))
+            skipped=$((skipped + 1))
             ;;
     esac
 done

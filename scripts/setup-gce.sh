@@ -60,7 +60,8 @@ if [ -d "$INSTALL_DIR" ]; then
 else
     echo "Cloning repository..."
     sudo git clone "$REPO_URL" "$INSTALL_DIR"
-    sudo chown -R $USER:$USER "$INSTALL_DIR"
+    sudo chown -R "$USER:$USER" "$INSTALL_DIR"
+    chmod 750 "$INSTALL_DIR"
     cd "$INSTALL_DIR"
 fi
 
@@ -97,7 +98,8 @@ fi
 # Create log directory
 sudo mkdir -p /var/log
 sudo touch /var/log/security-guard-update.log
-sudo chown $USER:$USER /var/log/security-guard-update.log
+sudo chmod 640 /var/log/security-guard-update.log
+sudo chown "$USER:$USER" /var/log/security-guard-update.log
 
 # Make scripts executable
 chmod +x scripts/*.sh

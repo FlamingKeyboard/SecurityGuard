@@ -29,6 +29,10 @@ LOCK_FILE="${LOCK_FILE:-/var/run/security-guard-update.lock}"
 # Ensure lock directory exists
 mkdir -p "$(dirname "$LOCK_FILE")"
 
+# Set secure permissions on lock file
+touch "$LOCK_FILE"
+chmod 600 "$LOCK_FILE"
+
 # Lock file mechanism - prevent concurrent runs
 exec 200>"$LOCK_FILE"
 if ! flock -n 200; then
@@ -99,14 +103,17 @@ sleep 5
 if $COMPOSE_CMD ps | grep -q "Up"; then
     log "Service verified running"
 else
-    log "WARNING: Service may not be running correctly"
-    $COMPOSE_CMD ps
+    log "ERROR: Service failed to start correctly"
+    $COMPOSE_CMD ps || true
+    exit 1  # Trigger rollback
 fi
 
-# Show recent logs
-log "Recent container logs:"
-$COMPOSE_CMD logs --tail=20
-
-# Success - disable trap's rollback behavior
+# Success - disable trap's rollback behavior before diagnostic commands
 trap - EXIT
+
+# Show recent logs (protected from triggering rollback)
+log "Recent container logs:"
+$COMPOSE_CMD logs --tail=20 || true
+
+# Release lock
 flock -u 200

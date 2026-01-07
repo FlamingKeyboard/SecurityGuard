@@ -47,14 +47,13 @@ services:
         max-file: "3"
 
     # Resource limits for e2-micro (1GB RAM, shared CPU)
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: '0.5'
-        reservations:
-          memory: 256M
-          cpus: '0.25'
+    # Note: Using mem_limit/mem_reservation instead of deploy.resources
+    # because Podman ignores deploy.resources (Docker Swarm syntax)
+    mem_limit: 512M
+    mem_reservation: 256M
+
+    # Required for GCP ADC - allows container to access metadata server at 169.254.169.254
+    network_mode: host
 
     # Security options for SELinux
     security_opt:
