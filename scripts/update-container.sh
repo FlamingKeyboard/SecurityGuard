@@ -270,21 +270,7 @@ main() {
     if check_container_health "${HEALTH_CHECK_RETRIES}" "${CONTAINER_STARTUP_WAIT}"; then
         log_success "========== Update Completed Successfully =========="
         log_success "Updated from ${PREVIOUS_COMMIT} to ${NEW_COMMIT}"
-
-        # Get commit message for notification
-        COMMIT_MSG=$(git log -1 --pretty=format:"%s" "${NEW_COMMIT}")
-
-        # Send success notification
-        send_pushover_notification \
-            "Security Guard Updated" \
-            "Successfully updated Security Guard at $(date '+%Y-%m-%d %H:%M:%S')
-
-Old commit: ${PREVIOUS_COMMIT:0:8}
-New commit: ${NEW_COMMIT:0:8}
-
-${COMMIT_MSG}" \
-            0
-
+        # No notification on success - only alert on failures
         exit 0
     else
         log_error "========== Update Failed - Health Check Failed =========="

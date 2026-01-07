@@ -7,6 +7,20 @@ Main entry point that coordinates:
 - Gemini vision analysis
 - Notifications based on risk assessment
 - GCP integration for logging and image archival
+
+IMPORTANT SAFETY NOTE (2026-01):
+    This system does NOT and MUST NOT automatically trigger the Vivint alarm
+    panel, even when critical threats are detected. The Vivint alarm system
+    may dispatch 911 automatically depending on monitoring plan configuration.
+
+    We are in a testing/validation phase for the AI detection pipeline.
+    False-positive 911 calls are completely unacceptable. All physical alarm
+    triggering must go through explicit human confirmation via the Vivint app.
+
+    The vivintpy library includes a trigger_alarm() method, but it is
+    intentionally not wired into this automation. Do not add automatic alarm
+    triggering without extensive testing AND a human-in-the-loop confirmation
+    mechanism.
 """
 
 import asyncio
@@ -475,6 +489,13 @@ class SecurityGuard:
             # Add CRITICAL prefix for emergency situations
             if analysis.risk_tier == "critical":
                 title = f"🆘 CRITICAL: {camera.name}"
+                # NOTE (2026-01): We intentionally DO NOT auto-trigger the Vivint
+                # alarm here, even for critical threats. Triggering the alarm may
+                # cause automatic 911 dispatch. Until the AI detection system has
+                # been thoroughly tested and proven reliable, all alarm triggering
+                # must require explicit human confirmation via the Vivint app.
+                # False-positive 911 calls are unacceptable during testing.
+                # See also: vivintpy/devices/alarm_panel.py:trigger_alarm()
 
             notification = format_notification(camera.name, analysis)
             await send_notification(
