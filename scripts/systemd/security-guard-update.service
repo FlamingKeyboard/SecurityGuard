@@ -1,0 +1,10 @@
+[Unit]
+Description=Security Guard Container Update
+After=network.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/opt/security-guard/scripts/update-container.sh
+StandardOutput=append:/var/log/security-guard/update.log
+StandardError=append:/var/log/security-guard/update.log

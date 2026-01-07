@@ -1,0 +1,10 @@
+[Unit]
+Description=Security Guard VM Monitor
+After=network.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/python3 /opt/security-guard/scripts/vm_monitor.py
+StandardOutput=append:/var/log/security-guard/monitor.log
+StandardError=append:/var/log/security-guard/monitor.log

@@ -59,12 +59,12 @@ services:
     security_opt:
       - label=type:container_runtime_t
 
-    # Health check
+    # Health check - uses the /health/live endpoint
     healthcheck:
-      test: ["CMD", "python", "-c", "import security_guard"]
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health/live"]
       interval: 30s
       timeout: 10s
-      start_period: 5s
+      start_period: 60s
       retries: 3
 
 volumes:

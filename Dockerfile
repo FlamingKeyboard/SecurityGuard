@@ -1,9 +1,10 @@
 FROM python:3.12-slim
 
-# Install ffmpeg and git for RTSP frame capture and cloning vivintpy
+# Install ffmpeg, git, and curl for RTSP frame capture, cloning vivintpy, and health checks
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     git \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
@@ -43,8 +44,8 @@ USER secguard
 #
 # Note: On GCE with ADC, only GCP_PROJECT_ID is needed
 
-# Health check - verify Python can import the app
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import security_guard" || exit 1
+# Health check - uses the /health/live endpoint
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -sf http://localhost:8080/health/live || exit 1
 
 CMD ["python", "-u", "security_guard.py"]

@@ -27,6 +27,7 @@ from gcp_logging import (
     test_bigquery_connection,
 )
 from gcp_storage import upload_image, archive_old_images, test_gcs_connection
+from health_check import start_health_server, stop_health_server
 
 
 def check_hub_connectivity() -> bool:
@@ -554,9 +555,13 @@ async def main():
         print("\nHub connectivity check failed. Exiting.")
         return
 
+    # Start health check server
+    await start_health_server()
+
     guard = SecurityGuard()
 
     if not await guard.start():
+        await stop_health_server()
         return
 
     print("\n" + "=" * 60)
@@ -597,6 +602,7 @@ async def main():
     else:
         print("GCP integration: DISABLED (local storage only)")
 
+    print("Health check: http://localhost:8080/health")
     print("Press Ctrl+C to stop.")
     print("=" * 60 + "\n")
 
@@ -608,6 +614,7 @@ async def main():
         print("\nShutting down...")
     finally:
         await guard.stop()
+        await stop_health_server()
 
 
 if __name__ == "__main__":
