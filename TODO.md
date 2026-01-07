@@ -25,9 +25,9 @@
 - [x] Log sync results
 
 ### 2.2 Container Auto-Restart on VM Reboot
-- [~] Enable podman systemd integration
-- [~] Generate systemd unit for security-guard container
-- [~] Enable unit to start on boot
+- [x] Enable podman systemd integration (podman-restart.service enabled)
+- [x] Container uses `restart: unless-stopped` in compose
+- [x] Enable unit to start on boot
 
 ### 2.3 Smart Container Auto-Update from Git
 **Requirements:**
@@ -171,12 +171,19 @@ Created `scripts/vm_monitor.py`:
 
 ## 6. Current Deployment Status
 
-### 6.1 VM Deployment (In Progress)
+### 6.1 VM Deployment (Almost Complete)
 - [x] Changes committed and pushed to GitHub
-- [~] Rebuilding container with new health check endpoint
-- [ ] Install systemd services on VM
-- [ ] Start container and verify health endpoint
-- [ ] Verify all timers are active
+- [x] Container rebuilt with health check endpoint
+- [x] Systemd services installed on VM
+- [x] All timers enabled and started:
+  - security-guard-sync.timer (hourly)
+  - security-guard-update.timer (every 6 hours)
+  - security-guard-monitor.timer (every 5 minutes)
+  - security-guard-weekly.timer (Sunday 8 PM)
+- [x] podman-restart.service enabled for auto-restart on boot
+- [~] Container needs MFA authentication to start
+- [ ] Test health endpoint once container is running
+- [ ] Verify all cameras are receiving events
 
 ---
 
@@ -186,8 +193,8 @@ Created `scripts/vm_monitor.py`:
 2. **Phase 2: Health Check Endpoint** (needed for monitoring) - DONE
 3. **Phase 3: Automation Scripts** (sync timer, auto-restart, auto-update) - DONE
 4. **Phase 4: VM Monitoring** (resource checks, alerts) - DONE
-5. **Phase 5: Podman Integration** (healthcheck, systemd) - IN PROGRESS
-6. **Phase 6: Testing & Verification** - PENDING
+5. **Phase 5: Podman Integration** (healthcheck, systemd) - DONE
+6. **Phase 6: Testing & Verification** - AWAITING MFA AUTH
 
 ---
 
