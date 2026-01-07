@@ -144,9 +144,10 @@ Created `scripts/vm_monitor.py`:
 **Recommended: Looker Studio** - Free, easy BigQuery integration, no hosting needed
 
 ### 4.2 Other Cameras
-- [ ] Verify driveway camera receives motion events
-- [ ] All cameras connected to Vivint hub should work automatically
-- [ ] Motion events come through PubNub for all cameras
+- [x] Verify driveway camera receives motion events
+- [x] All cameras connected to Vivint hub work automatically
+- [x] Motion events come through PubNub for all cameras
+- [x] Monitoring: Doorbell (ID: 40), Driveway (ID: 48), Backyard (ID: 52)
 
 ---
 
@@ -171,7 +172,7 @@ Created `scripts/vm_monitor.py`:
 
 ## 6. Current Deployment Status
 
-### 6.1 VM Deployment (Almost Complete)
+### 6.1 VM Deployment (COMPLETE)
 - [x] Changes committed and pushed to GitHub
 - [x] Container rebuilt with health check endpoint
 - [x] Systemd services installed on VM
@@ -181,9 +182,10 @@ Created `scripts/vm_monitor.py`:
   - security-guard-monitor.timer (every 5 minutes)
   - security-guard-weekly.timer (Sunday 8 PM)
 - [x] podman-restart.service enabled for auto-restart on boot
-- [~] Container needs MFA authentication to start
-- [ ] Test health endpoint once container is running
-- [ ] Verify all cameras are receiving events
+- [x] Container authenticated with Vivint MFA
+- [x] Health endpoint working at http://localhost:8080/health
+- [x] All 3 cameras monitored: Doorbell, Driveway, Backyard
+- [x] PubNub subscription active for motion events
 
 ---
 
@@ -194,7 +196,7 @@ Created `scripts/vm_monitor.py`:
 3. **Phase 3: Automation Scripts** (sync timer, auto-restart, auto-update) - DONE
 4. **Phase 4: VM Monitoring** (resource checks, alerts) - DONE
 5. **Phase 5: Podman Integration** (healthcheck, systemd) - DONE
-6. **Phase 6: Testing & Verification** - AWAITING MFA AUTH
+6. **Phase 6: Testing & Verification** - DONE (all cameras active)
 
 ---
 
