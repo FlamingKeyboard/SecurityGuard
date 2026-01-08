@@ -10,6 +10,9 @@
 
 set -euo pipefail
 
+# PATH export for cron/systemd environment (minimal PATH by default)
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
 # Configuration
 INSTALL_DIR="/opt/security-guard"
 COMPOSE_FILE="compose-rocky.yaml"
