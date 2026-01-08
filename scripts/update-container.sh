@@ -196,6 +196,13 @@ main() {
     cd "${INSTALL_DIR}"
     log_info "Changed to directory: ${INSTALL_DIR}"
 
+    # Ensure data directory exists and has correct permissions for container
+    if [[ ! -d "${INSTALL_DIR}/data" ]]; then
+        mkdir -p "${INSTALL_DIR}/data"
+        log_info "Created data directory"
+    fi
+    chmod -R 777 "${INSTALL_DIR}/data" 2>/dev/null || true
+
     # Fetch latest changes from remote
     log_info "Fetching latest changes from origin/main..."
     if ! git fetch origin main >> "${LOG_FILE}" 2>&1; then
