@@ -1,4 +1,4 @@
-"""Google Cloud Storage integration for image archival."""
+"""Google Cloud Storage integration for media (image and video) archival."""
 
 import logging
 import os
@@ -166,16 +166,27 @@ def _get_bucket():
             return None
 
 
-def generate_image_path(
+def generate_media_path(
     camera_name: str,
     event_id: str,
     timestamp: datetime,
     frame_index: int = 0,
+    extension: str = "jpg",
 ) -> str:
     """
-    Generate a GCS path for an image with relevant metadata.
+    Generate a GCS path for a media file (image or video) with relevant metadata.
 
-    Format: images/YYYY/MM/DD/camera_name/event_id/HHMMSS_frame.jpg
+    Format: images/YYYY/MM/DD/camera_name/event_id/HHMMSS_index.ext
+
+    Args:
+        camera_name: Name of the camera
+        event_id: Event ID for grouping
+        timestamp: Timestamp of the capture
+        frame_index: Frame/clip index (0 for single captures)
+        extension: File extension without dot (jpg, mp4)
+
+    Returns:
+        GCS path string
     """
     date_path = timestamp.strftime("%Y/%m/%d")
     time_str = timestamp.strftime("%H%M%S")
@@ -185,11 +196,33 @@ def generate_image_path(
 
     return (
         f"{config.GCS_IMAGE_PREFIX}/{date_path}/{safe_camera}/"
-        f"{event_id}/{time_str}_{frame_index:02d}.jpg"
+        f"{event_id}/{time_str}_{frame_index:02d}.{extension}"
     )
 
 
-def upload_image(
+# Backward compatibility alias
+def generate_image_path(
+    camera_name: str,
+    event_id: str,
+    timestamp: datetime,
+    frame_index: int = 0,
+) -> str:
+    """Generate a GCS path for an image. (Deprecated: use generate_media_path)"""
+    return generate_media_path(camera_name, event_id, timestamp, frame_index, "jpg")
+
+
+# MIME type mapping for supported media files
+_MIME_TYPES = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".mp4": "video/mp4",
+    ".mkv": "video/x-matroska",
+    ".webm": "video/webm",
+}
+
+
+def upload_media(
     local_path: Path,
     camera_name: str,
     event_id: str,
@@ -197,32 +230,62 @@ def upload_image(
     frame_index: int = 0,
 ) -> Optional[str]:
     """
-    Upload an image to GCS.
+    Upload a media file (image or video) to GCS.
 
-    Returns the GCS URI (gs://bucket/path) or None if failed.
+    Automatically detects file type from extension and sets appropriate
+    content type for the upload.
+
+    Args:
+        local_path: Path to the local file
+        camera_name: Name of the camera
+        event_id: Event ID for grouping
+        timestamp: Timestamp of the capture
+        frame_index: Frame/clip index
+
+    Returns:
+        GCS URI (gs://bucket/path) or None if failed
     """
     bucket = _get_bucket()
     if not bucket:
-        _LOGGER.warning("GCS not available, skipping image upload")
+        _LOGGER.warning("GCS not available, skipping media upload")
         return None
 
     if not local_path.exists():
-        _LOGGER.warning("Image file not found: %s", local_path)
+        _LOGGER.warning("Media file not found: %s", local_path)
         return None
 
-    gcs_path = generate_image_path(camera_name, event_id, timestamp, frame_index)
+    # Determine extension and content type
+    extension = local_path.suffix.lower()
+    content_type = _MIME_TYPES.get(extension, "application/octet-stream")
+
+    # Generate GCS path with correct extension (without the dot)
+    gcs_path = generate_media_path(
+        camera_name, event_id, timestamp, frame_index, extension.lstrip(".")
+    )
 
     try:
         blob = bucket.blob(gcs_path)
-        blob.upload_from_filename(str(local_path), content_type="image/jpeg")
+        blob.upload_from_filename(str(local_path), content_type=content_type)
 
         uri = f"gs://{bucket.name}/{gcs_path}"
-        _LOGGER.debug("Uploaded image to %s", uri)
+        _LOGGER.debug("Uploaded %s to %s", local_path.name, uri)
         return uri
 
     except Exception as e:
-        _LOGGER.error("Failed to upload image to GCS: %s", e)
+        _LOGGER.error("Failed to upload media to GCS: %s", e)
         return None
+
+
+# Backward compatibility alias
+def upload_image(
+    local_path: Path,
+    camera_name: str,
+    event_id: str,
+    timestamp: datetime,
+    frame_index: int = 0,
+) -> Optional[str]:
+    """Upload an image to GCS. (Deprecated: use upload_media)"""
+    return upload_media(local_path, camera_name, event_id, timestamp, frame_index)
 
 
 def upload_image_bytes(
@@ -268,15 +331,19 @@ def get_disk_space_gb() -> float:
         return 0.0
 
 
-def archive_old_images(
+def archive_old_media(
     max_age_days: int = None,
     force_if_low_disk: bool = True,
 ) -> tuple[int, int]:
     """
-    Archive old images to GCS and delete local copies.
+    Archive old media files (images and videos) to GCS and delete local copies.
+
+    Archives files when either:
+    - Files are older than max_age_days (default: 30 days)
+    - Disk space is below DISK_SPACE_THRESHOLD_GB (default: 10GB)
 
     Args:
-        max_age_days: Archive images older than this (default: config.IMAGE_RETENTION_DAYS)
+        max_age_days: Archive media older than this (default: config.IMAGE_RETENTION_DAYS)
         force_if_low_disk: Force archive if disk space is low
 
     Returns:
@@ -290,7 +357,10 @@ def archive_old_images(
     low_disk = disk_space < config.DISK_SPACE_THRESHOLD_GB
 
     if low_disk:
-        _LOGGER.warning("Low disk space (%.1f GB), forcing image archival", disk_space)
+        _LOGGER.warning(
+            "Low disk space (%.1f GB < %.1f GB threshold), forcing media archival",
+            disk_space, config.DISK_SPACE_THRESHOLD_GB
+        )
         # Archive everything older than 1 day if low disk
         max_age_days = min(max_age_days, 1)
 
@@ -302,65 +372,94 @@ def archive_old_images(
 
     uploaded = 0
     deleted = 0
+    uploaded_images = 0
+    uploaded_videos = 0
 
-    for image_path in frames_dir.glob("*.jpg"):
-        try:
-            # Get file modification time
-            mtime = datetime.fromtimestamp(image_path.stat().st_mtime, tz=timezone.utc)
+    # Process both images (.jpg) and videos (.mp4)
+    media_patterns = ["*.jpg", "*.mp4"]
 
-            if mtime < cutoff:
-                # Parse camera name and timestamp from filename
-                # Format: {camera_name}_{YYYYMMDD}_{HHMMSS}_{NN}.jpg
-                # Camera name may contain underscores, so parse from right side
-                parts = image_path.stem.split("_")
-                if len(parts) >= 4:
-                    try:
-                        # Last part is frame index (NN)
-                        frame_index = int(parts[-1])
-                        # Second-to-last is time (HHMMSS)
-                        time_part = parts[-2]
-                        # Third-to-last is date (YYYYMMDD)
-                        date_part = parts[-3]
-                        # Everything before is camera name (may have underscores)
-                        camera_name = "_".join(parts[:-3])
+    for pattern in media_patterns:
+        for media_path in frames_dir.glob(pattern):
+            try:
+                # Get file modification time
+                mtime = datetime.fromtimestamp(media_path.stat().st_mtime, tz=timezone.utc)
 
-                        timestamp = datetime.strptime(
-                            f"{date_part}_{time_part}", "%Y%m%d_%H%M%S"
-                        ).replace(tzinfo=timezone.utc)
-                    except (ValueError, IndexError):
-                        camera_name = "Unknown"
-                        timestamp = mtime
-                        frame_index = 0
-                else:
+                if mtime < cutoff:
+                    # Parse camera name and timestamp from filename
+                    # Format: {camera_name}_{YYYYMMDD}_{HHMMSS}[_{NN}].ext
+                    # Camera name may contain underscores, so parse from right side
+                    # Videos may not have frame index, images do
+                    parts = media_path.stem.split("_")
+
                     camera_name = "Unknown"
                     timestamp = mtime
                     frame_index = 0
 
-                # Generate event ID from timestamp (for old images without event_id)
-                event_id = f"archive_{timestamp.strftime('%Y%m%d_%H%M%S')}"
+                    if len(parts) >= 3:
+                        try:
+                            # Check if last part is a frame index (2 digits)
+                            if len(parts[-1]) == 2 and parts[-1].isdigit():
+                                # Has frame index: camera_YYYYMMDD_HHMMSS_NN
+                                frame_index = int(parts[-1])
+                                time_part = parts[-2]
+                                date_part = parts[-3]
+                                camera_name = "_".join(parts[:-3])
+                            else:
+                                # No frame index: camera_YYYYMMDD_HHMMSS
+                                time_part = parts[-1]
+                                date_part = parts[-2]
+                                camera_name = "_".join(parts[:-2])
+                                frame_index = 0
 
-                # Upload to GCS
-                uri = upload_image(image_path, camera_name, event_id, timestamp, frame_index)
+                            timestamp = datetime.strptime(
+                                f"{date_part}_{time_part}", "%Y%m%d_%H%M%S"
+                            ).replace(tzinfo=timezone.utc)
+                        except (ValueError, IndexError):
+                            # Parsing failed, use defaults
+                            pass
 
-                if uri:
-                    uploaded += 1
-                    # Delete local file
-                    try:
-                        image_path.unlink()
-                        deleted += 1
-                        _LOGGER.debug("Archived and deleted: %s -> %s", image_path.name, uri)
-                    except OSError as unlink_err:
-                        _LOGGER.warning("Failed to delete %s after upload: %s", image_path.name, unlink_err)
-                else:
-                    _LOGGER.warning("Failed to upload %s, keeping local copy", image_path.name)
+                    # Generate event ID from timestamp (for old files without event_id)
+                    event_id = f"archive_{timestamp.strftime('%Y%m%d_%H%M%S')}"
 
-        except Exception as e:
-            _LOGGER.error("Error processing %s: %s", image_path.name, e)
+                    # Upload to GCS (upload_media handles both images and videos)
+                    uri = upload_media(media_path, camera_name, event_id, timestamp, frame_index)
+
+                    if uri:
+                        uploaded += 1
+                        if media_path.suffix.lower() == ".mp4":
+                            uploaded_videos += 1
+                        else:
+                            uploaded_images += 1
+
+                        # Delete local file
+                        try:
+                            media_path.unlink()
+                            deleted += 1
+                            _LOGGER.debug("Archived and deleted: %s -> %s", media_path.name, uri)
+                        except OSError as unlink_err:
+                            _LOGGER.warning("Failed to delete %s after upload: %s", media_path.name, unlink_err)
+                    else:
+                        _LOGGER.warning("Failed to upload %s, keeping local copy", media_path.name)
+
+            except Exception as e:
+                _LOGGER.error("Error processing %s: %s", media_path.name, e)
 
     if uploaded > 0:
-        _LOGGER.info("Archived %d images to GCS, deleted %d local files", uploaded, deleted)
+        _LOGGER.info(
+            "Archived %d media files to GCS (%d images, %d videos), deleted %d local files",
+            uploaded, uploaded_images, uploaded_videos, deleted
+        )
 
     return uploaded, deleted
+
+
+# Backward compatibility alias
+def archive_old_images(
+    max_age_days: int = None,
+    force_if_low_disk: bool = True,
+) -> tuple[int, int]:
+    """Archive old media to GCS. (Deprecated: use archive_old_media)"""
+    return archive_old_media(max_age_days, force_if_low_disk)
 
 
 def test_gcs_connection() -> tuple[bool, str]:

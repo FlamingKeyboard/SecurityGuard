@@ -50,7 +50,7 @@ from gcp_logging import (
     run_sync as run_gcp_sync,
     test_bigquery_connection,
 )
-from gcp_storage import upload_image, archive_old_images, test_gcs_connection
+from gcp_storage import upload_media, archive_old_media, test_gcs_connection
 from health_check import start_health_server, stop_health_server
 
 
@@ -520,7 +520,7 @@ class SecurityGuard:
                 # Upload all videos to GCS
                 video_uris = {}
                 for cam_name, video_path in multi_capture.videos.items():
-                    uri = upload_image(
+                    uri = upload_media(
                         local_path=video_path,
                         camera_name=cam_name,
                         event_id=event_id,
@@ -632,7 +632,7 @@ class SecurityGuard:
             _LOGGER.info("Captured video, analyzing with Gemini...")
 
             # Upload video to GCS
-            video_uri = upload_image(
+            video_uri = upload_media(
                 local_path=capture_result.video_path,
                 camera_name=camera_name,
                 event_id=event_id,
@@ -663,7 +663,7 @@ class SecurityGuard:
             # Upload frames to GCS
             image_uris = []
             for i, frame_path in enumerate(frames):
-                uri = upload_image(
+                uri = upload_media(
                     local_path=frame_path,
                     camera_name=camera_name,
                     event_id=event_id,
@@ -748,11 +748,11 @@ class SecurityGuard:
                             synced, failed, cleaned
                         )
 
-                    # Archive old images to GCS
-                    uploaded, deleted = await asyncio.to_thread(archive_old_images)
+                    # Archive old media (images and videos) to GCS
+                    uploaded, deleted = await asyncio.to_thread(archive_old_media)
                     if uploaded > 0 or deleted > 0:
                         _LOGGER.info(
-                            "Image archival: %d uploaded to GCS, %d deleted locally",
+                            "Media archival: %d uploaded to GCS, %d deleted locally",
                             uploaded, deleted
                         )
                 except Exception as e:

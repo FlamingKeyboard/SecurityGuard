@@ -92,7 +92,7 @@ BQ_TABLE = os.getenv("BQ_TABLE", "security_logs")
 # Archival settings
 IMAGE_RETENTION_DAYS = 30  # Archive images older than this to GCS
 LOG_RETENTION_DAYS = 30    # Archive logs older than this to BigQuery
-DISK_SPACE_THRESHOLD_GB = 5  # Trigger archival if disk space below this
+DISK_SPACE_THRESHOLD_GB = 10  # Trigger archival if disk space below this
 
 # Sync settings
 SYNC_INTERVAL_SECONDS = 3600  # Hourly sync to GCP
