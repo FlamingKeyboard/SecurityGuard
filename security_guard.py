@@ -868,25 +868,25 @@ async def main():
         except Exception:
             pass  # File doesn't exist or invalid content
 
-        if should_alert:
-            # Send Pushover notification with high priority
-            sent = await send_pushover(
-                title="🔐 Vivint Authentication Required",
-                message=(
-                    f"{str(e)}\n\n"
-                    "The security guard service cannot connect to Vivint and "
-                    "requires manual re-authentication. The service will restart "
-                    "and retry automatically."
-                ),
-                priority=1,  # High priority - bypasses quiet hours
-            )
-
-            if sent:
-                # Record alert timestamp
-                try:
-                    auth_alert_file.write_text(str(time.time()))
-                except Exception:
-                    pass
+        # DISABLED: MFA Pushover alerts were causing spam
+        # TODO: Re-enable with better rate limiting or manual trigger only
+        # if should_alert:
+        #     sent = await send_pushover(
+        #         title="🔐 Vivint Authentication Required",
+        #         message=(
+        #             f"{str(e)}\n\n"
+        #             "The security guard service cannot connect to Vivint and "
+        #             "requires manual re-authentication. The service will restart "
+        #             "and retry automatically."
+        #         ),
+        #         priority=1,
+        #     )
+        #     if sent:
+        #         try:
+        #             auth_alert_file.write_text(str(time.time()))
+        #         except Exception:
+        #             pass
+        should_alert = False  # Disabled
 
         print("\n" + "=" * 60)
         print("AUTHENTICATION REQUIRED")
