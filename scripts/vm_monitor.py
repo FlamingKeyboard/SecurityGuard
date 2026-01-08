@@ -192,8 +192,19 @@ def check_memory_usage():
 def check_container_running():
     """Check if the container is running."""
     try:
+        # Container runs rootless under gavinfullertx, so we need to run podman as that user
+        # when this script runs as root (via systemd)
+        import pwd
+        current_user = pwd.getpwuid(os.getuid()).pw_name
+
+        if current_user == "root":
+            # Run as gavinfullertx to see rootless containers
+            cmd = ["sudo", "-u", "gavinfullertx", "podman", "ps", "--filter", f"name={CONTAINER_NAME}", "--format", "{{.Status}}"]
+        else:
+            cmd = ["podman", "ps", "--filter", f"name={CONTAINER_NAME}", "--format", "{{.Status}}"]
+
         result = subprocess.run(
-            ["podman", "ps", "--filter", f"name={CONTAINER_NAME}", "--format", "{{.Status}}"],
+            cmd,
             capture_output=True,
             text=True,
             timeout=10
