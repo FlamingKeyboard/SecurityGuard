@@ -36,8 +36,9 @@ services:
     # Persist data with SELinux labels
     # :Z = Private volume (only this container can access)
     # :z = Shared volume (multiple containers can access)
+    # Using bind mount so host credentials are directly accessible
     volumes:
-      - security-guard-data:/app/data:Z
+      - ./data:/app/data:Z
 
     # Logging configuration
     logging:
@@ -67,6 +68,3 @@ services:
       start_period: 60s
       retries: 3
 
-volumes:
-  security-guard-data:
-    driver: local
