@@ -23,6 +23,18 @@ HEALTH_CHECK_RETRIES=3
 HEALTH_CHECK_WAIT=30
 CONTAINER_STARTUP_WAIT=30
 
+# Container runs rootless under this user
+PODMAN_USER="gavinfullertx"
+
+# Function to run podman-compose as the correct user
+run_podman_compose() {
+    if [[ "$(id -un)" == "root" ]]; then
+        sudo -u "${PODMAN_USER}" podman-compose "$@"
+    else
+        podman-compose "$@"
+    fi
+}
+
 # Colors for output (optional, for terminal visibility)
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -143,14 +155,14 @@ rollback_to_commit() {
         log_info "Git checkout to ${previous_commit} successful"
 
         log_info "Rebuilding container with previous version..."
-        if podman-compose -f "${COMPOSE_FILE}" build >> "${LOG_FILE}" 2>&1; then
+        if run_podman_compose -f "${COMPOSE_FILE}" build >> "${LOG_FILE}" 2>&1; then
             log_info "Build successful"
 
             log_info "Stopping existing container..."
-            podman-compose -f "${COMPOSE_FILE}" down >> "${LOG_FILE}" 2>&1 || true
+            run_podman_compose -f "${COMPOSE_FILE}" down >> "${LOG_FILE}" 2>&1 || true
 
             log_info "Starting container with rolled-back version..."
-            if podman-compose -f "${COMPOSE_FILE}" up -d >> "${LOG_FILE}" 2>&1; then
+            if run_podman_compose -f "${COMPOSE_FILE}" up -d >> "${LOG_FILE}" 2>&1; then
                 log_info "Container started"
 
                 if check_container_health "${HEALTH_CHECK_RETRIES}" "${CONTAINER_STARTUP_WAIT}"; then
@@ -249,7 +261,7 @@ main() {
 
     # Build new container image
     log_info "Building new container image..."
-    if ! podman-compose -f "${COMPOSE_FILE}" build >> "${LOG_FILE}" 2>&1; then
+    if ! run_podman_compose -f "${COMPOSE_FILE}" build >> "${LOG_FILE}" 2>&1; then
         log_error "Failed to build container image"
         send_pushover_notification \
             "Security Guard Update Failed" \
@@ -265,11 +277,11 @@ main() {
 
     # Stop existing container before deploying new one
     log_info "Stopping existing container..."
-    podman-compose -f "${COMPOSE_FILE}" down >> "${LOG_FILE}" 2>&1 || true
+    run_podman_compose -f "${COMPOSE_FILE}" down >> "${LOG_FILE}" 2>&1 || true
 
     # Deploy updated container with new image
     log_info "Deploying updated container..."
-    if ! podman-compose -f "${COMPOSE_FILE}" up -d >> "${LOG_FILE}" 2>&1; then
+    if ! run_podman_compose -f "${COMPOSE_FILE}" up -d >> "${LOG_FILE}" 2>&1; then
         log_error "Failed to deploy updated container"
         send_pushover_notification \
             "Security Guard Update Failed" \

@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=oneshot
-User=root
+User=gavinfullertx
 WorkingDirectory=/opt/security-guard
 ExecStart=/usr/bin/podman exec vivint-security-guard python /app/manual_sync.py
 StandardOutput=append:/var/log/security-guard/sync.log

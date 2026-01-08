@@ -81,10 +81,20 @@ def get_container_status():
     container_name = "vivint-security-guard"
 
     try:
-        # Use podman ps to get status and uptime directly
+        # Container runs rootless under gavinfullertx, so we need to run podman as that user
+        # when this script runs as root (via systemd)
+        import pwd
+        current_user = pwd.getpwuid(os.getuid()).pw_name
+
+        if current_user == "root":
+            cmd = ["sudo", "-u", "gavinfullertx", "podman", "ps", "-a", "--filter", f"name={container_name}",
+                   "--format", "{{.Names}}|{{.Status}}|{{.RunningFor}}"]
+        else:
+            cmd = ["podman", "ps", "-a", "--filter", f"name={container_name}",
+                   "--format", "{{.Names}}|{{.Status}}|{{.RunningFor}}"]
+
         result = subprocess.run(
-            ["podman", "ps", "-a", "--filter", f"name={container_name}",
-             "--format", "{{.Names}}|{{.Status}}|{{.RunningFor}}"],
+            cmd,
             capture_output=True,
             text=True,
             timeout=10
