@@ -158,11 +158,8 @@ rollback_to_commit() {
         if run_podman_compose -f "${COMPOSE_FILE}" build >> "${LOG_FILE}" 2>&1; then
             log_info "Build successful"
 
-            log_info "Stopping existing container..."
-            run_podman_compose -f "${COMPOSE_FILE}" down >> "${LOG_FILE}" 2>&1 || true
-
             log_info "Starting container with rolled-back version..."
-            if run_podman_compose -f "${COMPOSE_FILE}" up -d >> "${LOG_FILE}" 2>&1; then
+            if run_podman_compose -f "${COMPOSE_FILE}" up -d --force-recreate >> "${LOG_FILE}" 2>&1; then
                 log_info "Container started"
 
                 if check_container_health "${HEALTH_CHECK_RETRIES}" "${CONTAINER_STARTUP_WAIT}"; then
@@ -275,13 +272,11 @@ main() {
 
     log_success "Container image built successfully"
 
-    # Stop existing container before deploying new one
-    log_info "Stopping existing container..."
-    run_podman_compose -f "${COMPOSE_FILE}" down >> "${LOG_FILE}" 2>&1 || true
-
     # Deploy updated container with new image
-    log_info "Deploying updated container..."
-    if ! run_podman_compose -f "${COMPOSE_FILE}" up -d >> "${LOG_FILE}" 2>&1; then
+    # Using 'up -d' directly instead of 'down' then 'up' minimizes downtime
+    # podman-compose will stop the old container and start the new one atomically
+    log_info "Deploying updated container (minimal downtime)..."
+    if ! run_podman_compose -f "${COMPOSE_FILE}" up -d --force-recreate >> "${LOG_FILE}" 2>&1; then
         log_error "Failed to deploy updated container"
         send_pushover_notification \
             "Security Guard Update Failed" \
