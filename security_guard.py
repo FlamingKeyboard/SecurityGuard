@@ -114,7 +114,7 @@ def _print_connectivity_help(hub_ip: str) -> None:
     print("     - Check for firewall blocking port 8554")
 
 
-from vivint_client import VivintClient, load_credentials
+from vivint_client import VivintClient, load_credentials, VivintAuthInterventionRequired
 from frame_capture import (
     capture_frames,
     capture_with_fallback,
@@ -845,9 +845,64 @@ async def main():
 
     guard = SecurityGuard()
 
-    if not await guard.start():
+    try:
+        if not await guard.start():
+            await stop_health_server()
+            return
+    except VivintAuthInterventionRequired as e:
+        # Auth requires user intervention - send Pushover alert and exit
+        _LOGGER.error("Vivint auth intervention required: %s", e)
+
+        # Rate-limit auth failure alerts (max once per 30 minutes)
+        auth_alert_file = config.DATA_DIR / ".last_auth_alert"
+        should_alert = True
+        alert_cooldown_seconds = 1800  # 30 minutes
+
+        try:
+            if auth_alert_file.exists():
+                last_alert_time = float(auth_alert_file.read_text().strip())
+                if time.time() - last_alert_time < alert_cooldown_seconds:
+                    _LOGGER.info("Auth alert rate-limited (last sent %.0f seconds ago)",
+                                time.time() - last_alert_time)
+                    should_alert = False
+        except Exception:
+            pass  # File doesn't exist or invalid content
+
+        if should_alert:
+            # Send Pushover notification with high priority
+            sent = await send_pushover(
+                title="🔐 Vivint Authentication Required",
+                message=(
+                    f"{str(e)}\n\n"
+                    "The security guard service cannot connect to Vivint and "
+                    "requires manual re-authentication. The service will restart "
+                    "and retry automatically."
+                ),
+                priority=1,  # High priority - bypasses quiet hours
+            )
+
+            if sent:
+                # Record alert timestamp
+                try:
+                    auth_alert_file.write_text(str(time.time()))
+                except Exception:
+                    pass
+
+        print("\n" + "=" * 60)
+        print("AUTHENTICATION REQUIRED")
+        print("=" * 60)
+        print(str(e))
+        if should_alert:
+            print("\nA Pushover notification has been sent.")
+        else:
+            print("\n(Pushover alert rate-limited - already sent recently)")
+        print("The service will exit and systemd will restart it.")
+        print("=" * 60 + "\n")
+
         await stop_health_server()
-        return
+        # Exit with code 1 so systemd knows to restart
+        import sys
+        sys.exit(1)
 
     print("\n" + "=" * 60)
     print("Security Guard Service Running")

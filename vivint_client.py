@@ -19,6 +19,25 @@ import config
 
 _LOGGER = logging.getLogger(__name__)
 
+
+class VivintAuthInterventionRequired(Exception):
+    """
+    Raised when Vivint authentication requires user intervention.
+
+    This happens when:
+    - MFA is required but the system is running non-interactively
+    - Login fails and manual credential entry is needed
+    """
+    pass
+
+
+def is_interactive() -> bool:
+    """Check if we're running in an interactive terminal."""
+    try:
+        return sys.stdin.isatty()
+    except Exception:
+        return False
+
 # Check if we're on Windows (for DPAPI support)
 _IS_WINDOWS = sys.platform == "win32"
 
@@ -201,6 +220,11 @@ class VivintClient:
         # Fresh login required
         if not username or not password:
             _LOGGER.error("No credentials available. Run setup_credentials.py first.")
+            if not is_interactive():
+                raise VivintAuthInterventionRequired(
+                    "Vivint credentials not configured. "
+                    "Please run setup_credentials.py to configure your Vivint login."
+                )
             return False
 
         _LOGGER.info("Performing fresh login...")
@@ -215,9 +239,29 @@ class VivintClient:
                 subscribe_for_realtime_updates=True
             )
         except VivintSkyApiMfaRequiredError:
-            code = input("Enter MFA Code: ")
-            await self.account.verify_mfa(code)
-            _LOGGER.info("MFA verified")
+            if is_interactive():
+                # Running interactively - prompt for MFA code
+                code = input("Enter MFA Code: ")
+                await self.account.verify_mfa(code)
+                _LOGGER.info("MFA verified")
+            else:
+                # Non-interactive mode - cannot prompt for MFA
+                _LOGGER.error("MFA required but running non-interactively")
+                raise VivintAuthInterventionRequired(
+                    "Vivint MFA required. Please run setup_credentials.py or "
+                    "configure mode to enter the MFA code and re-authenticate."
+                )
+        except Exception as e:
+            # Handle other authentication failures
+            error_msg = str(e)
+            _LOGGER.error("Vivint login failed: %s", error_msg)
+            if not is_interactive():
+                # Non-interactive mode - raise auth intervention error
+                raise VivintAuthInterventionRequired(
+                    f"Vivint login failed: {error_msg}. "
+                    "Please check credentials and re-authenticate."
+                )
+            raise  # Re-raise in interactive mode
 
         # Save tokens for future use
         self._save_current_tokens()
