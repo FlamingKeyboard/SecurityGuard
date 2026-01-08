@@ -15,10 +15,6 @@ echo "============================================================"
 echo "Security Guard Setup"
 echo "============================================================"
 echo ""
-echo "NOTE: When prompted for tests:"
-echo "  - RTSP test: Answer 'n' (ffmpeg not installed on host)"
-echo "  - Diagnostics: Answer 'n' (GCP uses container's ADC)"
-echo ""
 
 cd "$INSTALL_DIR"
 

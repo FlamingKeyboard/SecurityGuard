@@ -233,28 +233,42 @@ async def main():
     print()
 
     # Step 6: Test RTSP capture (optional)
-    print("Step 6: Test RTSP Frame Capture")
+    print("Step 6: Test RTSP Video Capture")
     print("-" * 40)
 
-    test_rtsp = input("Test frame capture? (y/n): ").strip().lower()
-    if test_rtsp == 'y' and client.cameras and rtsp_urls:
-        from frame_capture import capture_single_frame
+    # Check if ffmpeg is available
+    import shutil
+    ffmpeg_available = shutil.which("ffmpeg") is not None
 
-        cam = client.cameras[0]
-        url = rtsp_urls.get(cam.id)
-        if url:
-            print(f"\nCapturing frame from {cam.name}...")
-            frame = await capture_single_frame(url, cam.name)
-            if frame:
-                print(f"Success! Frame saved to: {frame}")
-                print(f"File size: {frame.stat().st_size} bytes")
+    if not ffmpeg_available:
+        print("  [SKIP] ffmpeg not installed (only needed inside container)")
+        print("  Video capture will work when running in the container.")
+    elif not client.cameras or not rtsp_urls:
+        print("  [SKIP] No cameras available for testing")
+    else:
+        test_rtsp = input("Test video capture? (y/n): ").strip().lower()
+        if test_rtsp == 'y':
+            from frame_capture import capture_with_fallback
+
+            cam = client.cameras[0]
+            url = rtsp_urls.get(cam.id)
+            if url:
+                print(f"\nCapturing video from {cam.name}...")
+                result = await capture_with_fallback(url, cam.name)
+                if result.success:
+                    if result.video_path:
+                        print(f"Success! Video saved to: {result.video_path}")
+                        print(f"File size: {result.video_path.stat().st_size} bytes")
+                    elif result.frames:
+                        print(f"Success! Captured {len(result.frames)} frames")
+                        print(f"First frame: {result.frames[0]}")
+                else:
+                    print(f"Capture failed: {result.error}")
+                    print("\nTroubleshooting:")
+                    print("  1. Make sure ffmpeg is installed and in PATH")
+                    print("  2. Check if your PC can reach the Vivint hub")
             else:
-                print("Frame capture failed.")
-                print("\nTroubleshooting:")
-                print("  1. Make sure ffmpeg is installed and in PATH")
-                print("  2. Check if your PC can reach the Vivint hub")
-        else:
-            print("No RTSP URL available for first camera.")
+                print("No RTSP URL available for first camera.")
 
     # Disconnect Vivint
     if connected:
@@ -374,11 +388,31 @@ async def run_diagnostics(pushover_token: str, pushover_user: str, gemini_key: s
 
     # Test 4: GCP Integration (GCS + BigQuery)
     print("[4/4] Google Cloud Platform")
-    if not gcp_project:
-        print("  [SKIP] GCP not configured")
+
+    # Check if running on GCE (metadata service available)
+    gce_metadata_available = False
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            "http://169.254.169.254/computeMetadata/v1/project/project-id",
+            headers={"Metadata-Flavor": "Google"}
+        )
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            if resp.status == 200:
+                gce_metadata_available = True
+                detected_project = resp.read().decode().strip()
+                print(f"  [OK] Running on GCE - ADC available (project: {detected_project})")
+    except Exception:
+        pass  # Not on GCE
+
+    if gce_metadata_available:
+        print("  [OK] GCP credentials via Application Default Credentials (ADC)")
+        print("  GCS and BigQuery will use the VM's service account.")
+    elif not gcp_project:
+        print("  [SKIP] GCP not configured (not on GCE, no project ID set)")
     else:
         try:
-            from gcp_storage import test_gcs_connection, get_bucket_name
+            from gcp_storage import test_gcs_connection
             from gcp_logging import test_bigquery_connection
 
             # Test GCS
