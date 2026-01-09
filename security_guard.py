@@ -145,6 +145,10 @@ def load_stored_credentials():
     if creds.get("gemini_api_key") and not os.environ.get("GEMINI_API_KEY"):
         os.environ["GEMINI_API_KEY"] = creds["gemini_api_key"]
 
+    # Eleven Labs API key (for TTS doorbell responses)
+    if creds.get("eleven_labs_api_key") and not os.environ.get("ELEVEN_LABS_API_KEY"):
+        os.environ["ELEVEN_LABS_API_KEY"] = creds["eleven_labs_api_key"]
+
     # GCP credentials
     if creds.get("gcp_project_id") and not os.environ.get("GCP_PROJECT_ID"):
         os.environ["GCP_PROJECT_ID"] = creds["gcp_project_id"]
@@ -590,7 +594,9 @@ class SecurityGuard:
         risk_config = config.RISK_LEVELS.get(analysis.risk_tier, {})
 
         # Notify if person detected OR risk level warrants it
-        should_notify = analysis.person_detected or risk_config.get("notify", False)
+        # ALWAYS notify for doorbell events (button press or motion) - anyone at the door is important
+        is_doorbell = camera.name.lower() == "doorbell" or event_type == "doorbell"
+        should_notify = is_doorbell or analysis.person_detected or risk_config.get("notify", False)
 
         # Get priority from config (default to 0 = normal)
         priority = risk_config.get("priority", 0)
