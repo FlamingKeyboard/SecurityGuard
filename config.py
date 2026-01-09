@@ -71,6 +71,11 @@ RISK_LEVELS = {
 VIVINT_HUB_IP = os.getenv("VIVINT_HUB_IP", "192.168.8.132")
 VIVINT_HUB_RTSP_PORT = int(os.getenv("VIVINT_HUB_RTSP_PORT", "8554"))
 
+# Two-way audio settings
+# Local IP to bind for SIP/RTP (auto-detected if empty)
+# Set this if auto-detection picks wrong interface (e.g., Tailscale instead of LAN)
+TWO_WAY_LOCAL_IP = os.getenv("TWO_WAY_LOCAL_IP", "")
+
 # =============================================================================
 # Google Cloud Platform Settings
 # =============================================================================
