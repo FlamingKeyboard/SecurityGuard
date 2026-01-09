@@ -130,6 +130,26 @@ from gemini_analyzer import (
     SecurityAnalysis,
 )
 
+# Doorbell AI agent imports
+try:
+    from doorbell_agent import DoorbellAgent
+    from vivint_webrtc import (
+        VivintWebRTCClient,
+        VivintWebRTCConfig,
+        prefetch_webrtc_credentials,
+        PrefetchedCredentials,
+    )
+    DOORBELL_AI_AVAILABLE = True
+except ImportError as e:
+    _LOGGER = logging.getLogger(__name__)
+    _LOGGER.warning(f"Doorbell AI agent not available: {e}")
+    DOORBELL_AI_AVAILABLE = False
+    DoorbellAgent = None
+    VivintWebRTCClient = None
+    VivintWebRTCConfig = None
+    prefetch_webrtc_credentials = None
+    PrefetchedCredentials = None
+
 # Pushover credentials (loaded at startup)
 _pushover_token: str | None = None
 _pushover_user: str | None = None
@@ -356,6 +376,13 @@ class SecurityGuard:
         self._running = False
         self._event_queue: asyncio.Queue = asyncio.Queue()
 
+        # Doorbell AI agent state
+        self._doorbell_agent: DoorbellAgent | None = None
+        self._doorbell_webrtc: VivintWebRTCClient | None = None
+        self._doorbell_conversation_active = False
+        self._doorbell_conversation_lock = asyncio.Lock()
+        self._webrtc_credentials: PrefetchedCredentials | None = None
+
     def _get_cameras_to_capture(self, trigger_camera_name: str) -> dict[str, str]:
         """
         Get dict of camera names to RTSP URLs for multi-camera capture.
@@ -430,6 +457,10 @@ class SecurityGuard:
         asyncio.create_task(self._sync_loop())
         asyncio.create_task(self._heartbeat_loop())
 
+        # Pre-fetch WebRTC credentials for doorbell AI (reduces latency)
+        if DOORBELL_AI_AVAILABLE and config.DOORBELL_AI_ENABLED:
+            await self._prefetch_webrtc_credentials()
+
         _LOGGER.info("Security Guard service started")
         _LOGGER.info("Monitoring %d cameras", len(self.client.cameras))
         for cam in self.client.cameras:
@@ -437,12 +468,218 @@ class SecurityGuard:
 
         return True
 
+    async def _prefetch_webrtc_credentials(self):
+        """Pre-fetch Firebase credentials for faster doorbell AI connection."""
+        try:
+            # Find the doorbell camera
+            doorbell_camera = None
+            for cam in self.client.cameras:
+                if 'doorbell' in cam.name.lower():
+                    doorbell_camera = cam
+                    break
+
+            if not doorbell_camera:
+                _LOGGER.warning("No doorbell camera found for WebRTC prefetch")
+                return
+
+            # Get OAuth token from Vivint
+            api = self.client.account._api
+            tokens = api.tokens
+            oauth_token = tokens.get("id_token") or tokens.get("access_token")
+
+            if not oauth_token:
+                _LOGGER.warning("No OAuth token available for WebRTC prefetch")
+                return
+
+            # Get camera UUID
+            camera_uuid = doorbell_camera.data.get('uuid') if hasattr(doorbell_camera, 'data') else None
+            if not camera_uuid:
+                camera_uuid = doorbell_camera.serial_number or str(doorbell_camera.id)
+
+            # Prefetch credentials
+            _LOGGER.info("Pre-fetching WebRTC credentials for doorbell AI...")
+            self._webrtc_credentials = await prefetch_webrtc_credentials(
+                oauth_token=oauth_token,
+                camera_uuid=camera_uuid,
+            )
+            _LOGGER.info("WebRTC credentials pre-fetched successfully")
+
+        except Exception as e:
+            _LOGGER.warning(f"Failed to prefetch WebRTC credentials: {e}")
+
     async def stop(self) -> None:
         """Stop the security guard service."""
         _LOGGER.info("Stopping Security Guard service...")
         self._running = False
+
+        # Stop any active doorbell AI conversation
+        await self._stop_doorbell_conversation()
+
         await self.client.disconnect()
         _LOGGER.info("Security Guard service stopped")
+
+    async def _start_doorbell_conversation(self, camera) -> bool:
+        """
+        Start an AI conversation with a doorbell visitor.
+
+        Sets up:
+        - WebRTC two-way audio with the doorbell
+        - RTSP video capture for visual context
+        - Gemini Live API session for conversation
+
+        Args:
+            camera: The doorbell camera device
+
+        Returns:
+            True if conversation started successfully
+        """
+        if not DOORBELL_AI_AVAILABLE:
+            _LOGGER.warning("Doorbell AI not available - missing dependencies")
+            return False
+
+        # Use lock to prevent concurrent conversation starts
+        async with self._doorbell_conversation_lock:
+            if self._doorbell_conversation_active:
+                _LOGGER.info("Doorbell conversation already active, skipping")
+                return False
+
+            _LOGGER.info("Starting doorbell AI conversation...")
+
+            try:
+                # Get OAuth token
+                api = self.client.account._api
+                tokens = api.tokens
+                oauth_token = tokens.get("id_token") or tokens.get("access_token")
+
+                if not oauth_token:
+                    _LOGGER.error("No OAuth token available for doorbell AI")
+                    return False
+
+                # Get camera UUID
+                camera_uuid = camera.data.get('uuid') if hasattr(camera, 'data') else None
+                if not camera_uuid:
+                    camera_uuid = camera.serial_number or str(camera.id)
+
+                # Get RTSP URL for video
+                rtsp_url = self.client.get_rtsp_url(camera.id)
+
+                # Create WebRTC config with pre-fetched credentials if available
+                config_kwargs = {
+                    'oauth_token': oauth_token,
+                    'camera_uuid': camera_uuid,
+                }
+
+                if self._webrtc_credentials:
+                    config_kwargs.update({
+                        'prefetched_firebase_token': self._webrtc_credentials.firebase_token,
+                        'prefetched_firebase_id_token': self._webrtc_credentials.firebase_id_token,
+                        'prefetched_firebase_uid': self._webrtc_credentials.firebase_uid,
+                        'firebase_db_url': self._webrtc_credentials.firebase_db_url,
+                        'system_id': self._webrtc_credentials.system_id,
+                    })
+
+                webrtc_config = VivintWebRTCConfig(**config_kwargs)
+
+                # Create WebRTC client and enable AI mode
+                self._doorbell_webrtc = VivintWebRTCClient(webrtc_config)
+                self._doorbell_webrtc.enable_ai_conversation_mode()
+
+                # Connect WebRTC
+                _LOGGER.info("Connecting WebRTC for doorbell AI...")
+                if not await self._doorbell_webrtc.connect():
+                    _LOGGER.error("Failed to connect WebRTC for doorbell AI")
+                    self._doorbell_webrtc = None
+                    return False
+
+                # Create and start doorbell agent
+                self._doorbell_agent = DoorbellAgent()
+
+                _LOGGER.info("Starting Gemini Live session...")
+                if not await self._doorbell_agent.start_conversation():
+                    _LOGGER.error("Failed to start Gemini session for doorbell AI")
+                    await self._doorbell_webrtc.disconnect()
+                    self._doorbell_webrtc = None
+                    self._doorbell_agent = None
+                    return False
+
+                # Connect agent to WebRTC (audio piping)
+                await self._doorbell_agent.connect_to_webrtc(self._doorbell_webrtc)
+
+                # Start video capture if RTSP URL available
+                if rtsp_url:
+                    _LOGGER.info("Starting video capture for doorbell AI...")
+                    await self._doorbell_agent.start_video_capture(
+                        rtsp_url=rtsp_url,
+                        camera_name=camera.name,
+                        interval_seconds=config.DOORBELL_AI_VIDEO_INTERVAL,
+                    )
+
+                # Start two-way talk
+                _LOGGER.info("Starting two-way talk...")
+                if not await self._doorbell_webrtc.start_two_way_talk():
+                    _LOGGER.error("Failed to start two-way talk")
+                    await self._doorbell_agent.end_conversation()
+                    await self._doorbell_webrtc.disconnect()
+                    self._doorbell_webrtc = None
+                    self._doorbell_agent = None
+                    return False
+
+                self._doorbell_conversation_active = True
+                _LOGGER.info("Doorbell AI conversation active!")
+
+                # Send initial context about the doorbell press
+                await self._doorbell_agent.inject_context(
+                    "Someone just pressed the doorbell button. Greet them warmly and ask how you can help."
+                )
+
+                # Schedule conversation timeout
+                asyncio.create_task(self._doorbell_conversation_timeout())
+
+                return True
+
+            except Exception as e:
+                _LOGGER.error(f"Error starting doorbell AI conversation: {e}")
+                import traceback
+                traceback.print_exc()
+
+                # Clean up on error
+                if self._doorbell_agent:
+                    await self._doorbell_agent.end_conversation()
+                    self._doorbell_agent = None
+                if self._doorbell_webrtc:
+                    await self._doorbell_webrtc.disconnect()
+                    self._doorbell_webrtc = None
+
+                return False
+
+    async def _doorbell_conversation_timeout(self):
+        """End the doorbell conversation after the configured timeout."""
+        await asyncio.sleep(config.DOORBELL_AI_CONVERSATION_DURATION)
+        if self._doorbell_conversation_active:
+            _LOGGER.info("Doorbell conversation timeout reached")
+            await self._stop_doorbell_conversation()
+
+    async def _stop_doorbell_conversation(self):
+        """Stop the active doorbell AI conversation."""
+        if not self._doorbell_conversation_active:
+            return
+
+        _LOGGER.info("Stopping doorbell AI conversation...")
+
+        async with self._doorbell_conversation_lock:
+            self._doorbell_conversation_active = False
+
+            if self._doorbell_agent:
+                self._doorbell_agent.disconnect_from_webrtc()
+                await self._doorbell_agent.end_conversation()
+                self._doorbell_agent = None
+
+            if self._doorbell_webrtc:
+                await self._doorbell_webrtc.stop_two_way_talk()
+                await self._doorbell_webrtc.disconnect()
+                self._doorbell_webrtc = None
+
+        _LOGGER.info("Doorbell AI conversation stopped")
 
     def _on_motion(self, camera, message: dict) -> None:
         """Handle motion event."""
@@ -481,6 +718,13 @@ class SecurityGuard:
         event_timestamp = datetime.now(timezone.utc)
 
         _LOGGER.debug("Event ID: %s, Conversation ID: %s", event_id, conversation_id)
+
+        # Start doorbell AI conversation if enabled and this is a doorbell event
+        is_doorbell_event = event_type == "doorbell" or 'doorbell' in camera.name.lower()
+        if is_doorbell_event and config.DOORBELL_AI_ENABLED:
+            # Start AI conversation in background (don't block normal processing)
+            asyncio.create_task(self._start_doorbell_conversation(camera))
+            _LOGGER.info("Doorbell AI conversation triggered")
 
         # Determine capture mode
         use_multi_camera = (
@@ -947,6 +1191,16 @@ async def main():
             print(f"    Error: {gcp_status.get('bigquery', (False, 'Unknown'))[1]}")
     else:
         print("GCP integration: DISABLED (local storage only)")
+
+    # Doorbell AI status
+    if config.DOORBELL_AI_ENABLED:
+        if DOORBELL_AI_AVAILABLE:
+            print(f"Doorbell AI: ENABLED (conversation: {config.DOORBELL_AI_CONVERSATION_DURATION}s)")
+        else:
+            print("Doorbell AI: ENABLED but unavailable (missing dependencies)")
+    else:
+        print("Doorbell AI: DISABLED")
+        print("  Set DOORBELL_AI_ENABLED=true to enable AI doorbell conversations")
 
     # Cloud Logging heartbeat status
     if _cloud_logger:

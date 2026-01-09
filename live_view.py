@@ -13,16 +13,17 @@ Usage:
     python live_view.py --audio-device "Microphone (Name)"  # Specify microphone
 
 Controls:
-    q     - Quit
-    s     - Save snapshot of all cameras
-    f     - Toggle fullscreen
-    a     - Toggle all audio on/off
-    n     - Toggle native resolution (in fullscreen)
-    1-3   - Focus on specific camera
-    !@#   - Toggle audio for camera 1/2/3 (Shift+1/2/3)
-    0     - Return to grid view
-    t     - Push-to-talk (speak through doorbell via WebRTC)
-    SPACE - Push-to-talk (alternative key)
+    q       - Quit
+    s       - Save snapshot of all cameras
+    f       - Toggle fullscreen
+    a       - Toggle all audio on/off
+    n       - Toggle native resolution (in fullscreen)
+    1-3     - Focus on specific camera
+    !@#     - Toggle audio for camera 1/2/3 (Shift+1/2/3)
+    0       - Return to grid view
+    t/SPACE - Push-to-talk (speak through doorbell via WebRTC)
+    y       - Show TTS quick response list
+    F1-F5   - Speak TTS quick response 1-5 through doorbell
 
 Audio:
     - Press Shift+1/2/3 to toggle audio for individual cameras
@@ -36,8 +37,16 @@ Two-Way Audio:
     - Works from anywhere (not just LAN)
     - Requires aiortc and doorbell with two-way audio support
 
+TTS (Text-to-Speech):
+    - F1: "Hello! I'll be right there."
+    - F2: "Please leave the package at the door."
+    - F3: "Sorry, I'm not available right now. Please leave a message."
+    - F4: "Hi! One moment please."
+    - F5: "Thank you, have a great day!"
+
 Requires: opencv-python (pip install opencv-python)
           aiortc (pip install aiortc) - for WebRTC two-way audio
+          elevenlabs (pip install elevenlabs) - for TTS responses (requires ELEVEN_LABS_API_KEY)
 Run with: python live_view.py
 """
 
@@ -57,10 +66,16 @@ _LOGGER = logging.getLogger(__name__)
 
 # Try to import WebRTC two-way audio (works from anywhere via TURN relay)
 try:
-    from vivint_webrtc import VivintWebRTCClient, VivintWebRTCConfig
+    from vivint_webrtc import (
+        VivintWebRTCClient, VivintWebRTCConfig, prefetch_webrtc_credentials,
+        PrefetchedCredentials, TTSEngine, speak_through_doorbell
+    )
     HAS_TWO_WAY_WEBRTC = True
 except ImportError:
     HAS_TWO_WAY_WEBRTC = False
+    PrefetchedCredentials = None
+    TTSEngine = None
+    speak_through_doorbell = None
     _LOGGER.debug("WebRTC two-way audio not available (aiortc not installed)")
 
 
@@ -72,16 +87,19 @@ class WebRTCTwoWayAudio:
     Runs the async WebRTC client in a background thread.
     """
 
-    def __init__(self, oauth_token: str, camera_uuid: str, audio_device: str = None):
+    def __init__(self, oauth_token: str, camera_uuid: str, audio_device: str = None,
+                 prefetched_credentials: 'PrefetchedCredentials' = None):
         """
         Args:
             oauth_token: Vivint OAuth id_token
             camera_uuid: Camera device UUID (from camera.data['uuid'])
             audio_device: Windows DirectShow audio device name (optional)
+            prefetched_credentials: Pre-fetched Firebase credentials (faster connection)
         """
         self.oauth_token = oauth_token
         self.camera_uuid = camera_uuid
         self.audio_device = audio_device
+        self.prefetched_credentials = prefetched_credentials
         self.client: Optional[VivintWebRTCClient] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
@@ -127,11 +145,23 @@ class WebRTCTwoWayAudio:
     async def _connect_and_start(self, connected_event: threading.Event):
         """Connect to camera and start two-way audio."""
         try:
-            config = VivintWebRTCConfig(
-                oauth_token=self.oauth_token,
-                camera_uuid=self.camera_uuid,
-                audio_device=self.audio_device,
-            )
+            # Build config with pre-fetched credentials if available
+            config_kwargs = {
+                'oauth_token': self.oauth_token,
+                'camera_uuid': self.camera_uuid,
+                'audio_device': self.audio_device,
+            }
+
+            if self.prefetched_credentials:
+                config_kwargs.update({
+                    'prefetched_firebase_token': self.prefetched_credentials.firebase_token,
+                    'prefetched_firebase_id_token': self.prefetched_credentials.firebase_id_token,
+                    'prefetched_firebase_uid': self.prefetched_credentials.firebase_uid,
+                    'firebase_db_url': self.prefetched_credentials.firebase_db_url,
+                    'system_id': self.prefetched_credentials.system_id,
+                })
+
+            config = VivintWebRTCConfig(**config_kwargs)
             self.client = VivintWebRTCClient(config)
 
             _LOGGER.info("WebRTC: Connecting...")
@@ -406,7 +436,8 @@ class MultiCameraViewer:
     """
 
     def __init__(self, cameras: dict[str, str], hd: bool = False, audio: bool = True,
-                 webrtc_credentials: dict = None, audio_device: str = None):
+                 webrtc_credentials: dict = None, audio_device: str = None,
+                 prefetched_credentials: 'PrefetchedCredentials' = None):
         """
         Args:
             cameras: Dict mapping camera names to RTSP URLs
@@ -414,6 +445,7 @@ class MultiCameraViewer:
             audio: Enable audio playback
             webrtc_credentials: {'oauth_token': str, 'camera_uuid': str} for WebRTC two-way audio
             audio_device: Windows DirectShow audio device name for WebRTC microphone
+            prefetched_credentials: Pre-fetched Firebase credentials for faster PTT
         """
         self.camera_urls = cameras  # Keep URLs for audio
         self.cameras = {
@@ -436,11 +468,23 @@ class MultiCameraViewer:
         # Two-way audio (push-to-talk) - WebRTC only (SIP doesn't support mic input)
         self.webrtc_credentials = webrtc_credentials
         self.audio_device = audio_device
+        self.prefetched_credentials = prefetched_credentials  # Pre-fetched for faster PTT
         self.webrtc_two_way = None  # WebRTC-based two-way audio
         self.ptt_active = False  # Push-to-talk active
         self.ptt_connected = False  # Session established
         self.ptt_last_toggle = 0  # Debounce timestamp
         self.ptt_failed = False  # Don't retry if failed
+
+        # TTS quick responses (Shift+number or function keys)
+        self.tts_responses = {
+            1: "Hello! I'll be right there.",
+            2: "Please leave the package at the door.",
+            3: "Sorry, I'm not available right now. Please leave a message.",
+            4: "Hi! One moment please.",
+            5: "Thank you, have a great day!",
+        }
+        self.tts_active = False  # TTS speaking in progress
+        self.tts_thread = None  # Background thread for TTS
 
     def start(self):
         """Start all camera capture threads."""
@@ -565,7 +609,10 @@ class MultiCameraViewer:
             _LOGGER.error("🎤 PTT: WebRTC not available")
             return
 
-        _LOGGER.info("🎤 PTT: Connecting via WebRTC (may take a few seconds)...")
+        if self.prefetched_credentials:
+            _LOGGER.info("🎤 PTT: Connecting via WebRTC (using pre-fetched tokens)...")
+        else:
+            _LOGGER.info("🎤 PTT: Connecting via WebRTC (may take a few seconds)...")
 
         try:
             if not self.webrtc_two_way:
@@ -573,6 +620,7 @@ class MultiCameraViewer:
                     oauth_token=self.webrtc_credentials.get('oauth_token'),
                     camera_uuid=self.webrtc_credentials.get('camera_uuid'),
                     audio_device=self.audio_device,
+                    prefetched_credentials=self.prefetched_credentials,
                 )
 
             if self.webrtc_two_way.start():
@@ -613,6 +661,58 @@ class MultiCameraViewer:
         self.ptt_active = False
         self.ptt_connected = False
         _LOGGER.info("🎤 PTT: Stopped")
+
+    def _speak_tts(self, response_num: int):
+        """Speak a TTS quick response through the doorbell."""
+        if self.tts_active:
+            _LOGGER.warning("🔊 TTS: Already speaking")
+            return
+
+        if self.ptt_active:
+            _LOGGER.warning("🔊 TTS: PTT is active, stop PTT first")
+            return
+
+        if not HAS_TWO_WAY_WEBRTC or not self.webrtc_credentials or not speak_through_doorbell:
+            _LOGGER.error("🔊 TTS: WebRTC not available")
+            return
+
+        text = self.tts_responses.get(response_num)
+        if not text:
+            _LOGGER.error(f"🔊 TTS: No response #{response_num}")
+            return
+
+        _LOGGER.info(f"🔊 TTS: Speaking response #{response_num}: '{text}'")
+        self.tts_active = True
+
+        def run_tts():
+            """Run TTS in background thread."""
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                oauth_token = self.webrtc_credentials.get('oauth_token')
+                camera_uuid = self.webrtc_credentials.get('camera_uuid')
+
+                success = loop.run_until_complete(
+                    speak_through_doorbell(
+                        text,
+                        oauth_token=oauth_token,
+                        camera_uuid=camera_uuid,
+                        prefetched_credentials=self.prefetched_credentials,
+                    )
+                )
+
+                if success:
+                    _LOGGER.info("🔊 TTS: Done speaking")
+                else:
+                    _LOGGER.error("🔊 TTS: Failed to speak")
+            except Exception as e:
+                _LOGGER.error(f"🔊 TTS: Error - {e}")
+            finally:
+                loop.close()
+                self.tts_active = False
+
+        self.tts_thread = threading.Thread(target=run_tts, daemon=True)
+        self.tts_thread.start()
 
     def create_grid(self, width: int, height: int) -> np.ndarray:
         """Create a grid layout of all camera feeds."""
@@ -886,6 +986,19 @@ class MultiCameraViewer:
                             self._start_ptt()
                     else:
                         _LOGGER.warning("Two-way audio not available (need WebRTC)")
+                # TTS quick responses: F1-F5 (function keys vary by platform)
+                # Also use Ctrl+1-5 as alternative (gives 0x31 with modifier)
+                elif key == 0:  # Extended key prefix on some systems
+                    pass  # Handled by next waitKey
+                elif 190 <= key <= 194:  # F1-F5 on some systems
+                    self._speak_tts(key - 189)
+                elif key in (176, 177, 178, 179, 180):  # Alternative F1-F5 codes
+                    self._speak_tts(key - 175)
+                # Numpad keys for TTS (when numlock is off)
+                elif key == ord('y'):  # 'y' for custom TTS (future: opens input dialog)
+                    _LOGGER.info("🔊 TTS Quick Responses (F1-F5 or Ctrl+1-5):")
+                    for num, text in self.tts_responses.items():
+                        _LOGGER.info(f"  {num}: {text}")
 
                 # Check if window was closed
                 if cv2.getWindowProperty(self.window_name, cv2.WND_PROP_VISIBLE) < 1:
@@ -898,13 +1011,14 @@ class MultiCameraViewer:
             cv2.destroyAllWindows()
 
 
-async def get_camera_urls(prefer_hd: bool = False) -> tuple[dict[str, str], dict]:
+async def get_camera_urls(prefer_hd: bool = False) -> tuple[dict[str, str], dict, 'PrefetchedCredentials']:
     """
     Connect to Vivint and get RTSP URLs for all cameras.
 
     Returns:
-        (urls_dict, webrtc_credentials) where:
+        (urls_dict, webrtc_credentials, prefetched_credentials) where:
         - webrtc_credentials is {'oauth_token': str, 'camera_uuid': str} for WebRTC two-way audio
+        - prefetched_credentials is PrefetchedCredentials for faster PTT connection
     """
     # Add project to path
     sys.path.insert(0, str(__file__).rsplit('\\', 1)[0])
@@ -921,7 +1035,7 @@ async def get_camera_urls(prefer_hd: bool = False) -> tuple[dict[str, str], dict
 
     if not await client.connect():
         print("Failed to connect to Vivint")
-        return {}, None
+        return {}, None, None
 
     urls = {}
     doorbell_uuid = None  # For WebRTC two-way audio
@@ -939,6 +1053,7 @@ async def get_camera_urls(prefer_hd: bool = False) -> tuple[dict[str, str], dict
 
     # Get WebRTC credentials for two-way audio
     webrtc_credentials = None
+    prefetched_credentials = None
     if doorbell_uuid:
         try:
             # Get OAuth id_token for WebRTC
@@ -951,6 +1066,16 @@ async def get_camera_urls(prefer_hd: bool = False) -> tuple[dict[str, str], dict
                     'camera_uuid': doorbell_uuid,
                 }
                 print(f"  Two-way audio: WebRTC ready")
+
+                # Pre-fetch Firebase credentials for faster PTT
+                if HAS_TWO_WAY_WEBRTC:
+                    try:
+                        print("  Pre-fetching Firebase credentials for faster PTT...")
+                        prefetched_credentials = await prefetch_webrtc_credentials(oauth_token, doorbell_uuid)
+                        print(f"  Firebase credentials pre-fetched (system: {prefetched_credentials.system_id})")
+                    except Exception as e:
+                        _LOGGER.warning(f"Failed to pre-fetch credentials: {e}")
+                        # Continue without pre-fetched credentials - PTT will still work, just slower
         except Exception as e:
             _LOGGER.warning(f"Failed to get WebRTC credentials: {e}")
 
@@ -959,7 +1084,7 @@ async def get_camera_urls(prefer_hd: bool = False) -> tuple[dict[str, str], dict
     # Restore setting
     config.RTSP_PREFER_HD = original_hd
 
-    return urls, webrtc_credentials
+    return urls, webrtc_credentials, prefetched_credentials
 
 
 async def main():
@@ -976,8 +1101,8 @@ async def main():
         elif not arg.startswith("--") and i > 0 and sys.argv[i-1] != "--audio-device":
             camera_filter = arg
 
-    # Get camera URLs and WebRTC credentials
-    urls, webrtc_credentials = await get_camera_urls(prefer_hd=use_hd)
+    # Get camera URLs and WebRTC credentials (with pre-fetched Firebase tokens)
+    urls, webrtc_credentials, prefetched_credentials = await get_camera_urls(prefer_hd=use_hd)
 
     if not urls:
         print("No cameras found")
@@ -989,7 +1114,10 @@ async def main():
 
     # Two-way audio status (WebRTC only)
     if HAS_TWO_WAY_WEBRTC and webrtc_credentials:
-        print(f"Two-way audio: WebRTC ready")
+        if prefetched_credentials:
+            print(f"Two-way audio: WebRTC ready (tokens pre-fetched for fast PTT)")
+        else:
+            print(f"Two-way audio: WebRTC ready")
         if audio_device:
             print(f"  Audio device: {audio_device}")
     else:
@@ -1005,6 +1133,7 @@ async def main():
         audio=use_audio,
         webrtc_credentials=webrtc_credentials,
         audio_device=audio_device,
+        prefetched_credentials=prefetched_credentials,
     )
 
     # If single camera specified, validate it

@@ -19,6 +19,10 @@ TOKEN_FILE = DATA_DIR / "vivint_tokens.enc"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = "gemini-3-flash-preview"  # Latest fast vision model
 
+# Eleven Labs TTS API
+ELEVEN_LABS_API_KEY = os.getenv("ELEVEN_LABS_API_KEY", "")
+ELEVEN_LABS_VOICE_ID = os.getenv("ELEVEN_LABS_VOICE_ID", "c6SfcYrb2t09NHXiT80T")  # Jarnathan - Confident and Versatile
+
 # Frame capture settings
 FRAME_CAPTURE_DIR = DATA_DIR / "frames"
 FRAME_CAPTURE_DIR.mkdir(exist_ok=True)
@@ -75,6 +79,26 @@ VIVINT_HUB_RTSP_PORT = int(os.getenv("VIVINT_HUB_RTSP_PORT", "8554"))
 # Local IP to bind for SIP/RTP (auto-detected if empty)
 # Set this if auto-detection picks wrong interface (e.g., Tailscale instead of LAN)
 TWO_WAY_LOCAL_IP = os.getenv("TWO_WAY_LOCAL_IP", "")
+
+# =============================================================================
+# Doorbell AI Agent Settings
+# =============================================================================
+
+# Enable AI-powered doorbell conversations
+# When enabled, doorbell events trigger a real-time AI conversation:
+# - WebRTC two-way audio with visitor
+# - RTSP video frames sent to Gemini for visual understanding
+# - Gemini Live API for natural conversation
+# - Automatic notifications to homeowner via Pushover
+DOORBELL_AI_ENABLED = os.getenv("DOORBELL_AI_ENABLED", "false").lower() == "true"
+
+# Duration of doorbell AI conversation (seconds)
+# Conversation ends after this timeout or when visitor leaves
+DOORBELL_AI_CONVERSATION_DURATION = int(os.getenv("DOORBELL_AI_CONVERSATION_DURATION", "60"))
+
+# Video frame capture interval for Gemini (seconds)
+# Lower = more visual context, higher = less API usage
+DOORBELL_AI_VIDEO_INTERVAL = float(os.getenv("DOORBELL_AI_VIDEO_INTERVAL", "1.0"))
 
 # =============================================================================
 # Google Cloud Platform Settings

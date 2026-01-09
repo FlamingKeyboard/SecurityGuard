@@ -62,6 +62,106 @@ FIREBASE_AUTH_URL = "https://identitytoolkit.googleapis.com/v1/accounts:signInWi
 # The shard URL is typically per-system and retrieved from the API
 FIREBASE_DB_URL = "https://vivint-prod.firebaseio.com"  # Default, may need adjustment
 
+# TTS settings - Eleven Labs Turbo v2.5
+# Voice: Jarnathan - Confident and Versatile
+TTS_DEFAULT_VOICE = "c6SfcYrb2t09NHXiT80T"  # Jarnathan
+TTS_VOICES = {
+    "jarnathan": "c6SfcYrb2t09NHXiT80T",  # Jarnathan - Confident and Versatile (default)
+}
+
+
+class TTSEngine:
+    """
+    Text-to-speech engine using Eleven Labs Turbo v2.5.
+
+    High-quality, low-latency speech synthesis.
+    Requires ELEVEN_LABS_API_KEY environment variable.
+    """
+
+    def __init__(self, voice_id: str = None, api_key: str = None):
+        """
+        Args:
+            voice_id: Eleven Labs voice ID (default: Jarnathan)
+            api_key: Eleven Labs API key (default: from ELEVEN_LABS_API_KEY env var)
+        """
+        import os
+        self.voice_id = voice_id or os.getenv("ELEVEN_LABS_VOICE_ID", TTS_DEFAULT_VOICE)
+        self.api_key = api_key or os.getenv("ELEVEN_LABS_API_KEY", "")
+        self._temp_dir = None
+
+        if not self.api_key:
+            _LOGGER.warning("TTS: ELEVEN_LABS_API_KEY not set - TTS will not work")
+
+    async def generate_speech(self, text: str, output_path: str = None) -> str:
+        """
+        Generate speech audio from text using Eleven Labs Turbo v2.5.
+
+        Args:
+            text: Text to speak
+            output_path: Path to save audio (optional, uses temp file if not provided)
+
+        Returns:
+            Path to generated audio file (MP3)
+        """
+        import tempfile
+        import os
+
+        if not self.api_key:
+            raise ValueError("ELEVEN_LABS_API_KEY not set")
+
+        if output_path is None:
+            if self._temp_dir is None:
+                self._temp_dir = tempfile.mkdtemp(prefix="tts_")
+            output_path = os.path.join(self._temp_dir, f"tts_{int(time.time() * 1000)}.mp3")
+
+        _LOGGER.info(f"TTS: Generating speech for: '{text[:50]}...' " if len(text) > 50 else f"TTS: Generating speech for: '{text}'")
+
+        # Use Eleven Labs client
+        from elevenlabs import AsyncElevenLabs
+
+        client = AsyncElevenLabs(api_key=self.api_key)
+
+        try:
+            # Generate audio using Eleven Turbo v2.5 (fastest model)
+            # Returns async generator, not coroutine
+            audio_generator = client.text_to_speech.convert(
+                voice_id=self.voice_id,
+                model_id="eleven_turbo_v2_5",  # Turbo v2.5 - low latency
+                text=text,
+                output_format="mp3_44100_128",  # High quality MP3
+            )
+
+            # Collect all audio chunks
+            audio_data = b""
+            async for chunk in audio_generator:
+                audio_data += chunk
+
+            # Write to file
+            with open(output_path, "wb") as f:
+                f.write(audio_data)
+
+            _LOGGER.info(f"TTS: Audio saved to {output_path} ({len(audio_data)} bytes)")
+            return output_path
+
+        finally:
+            pass  # AsyncElevenLabs client manages connections automatically
+
+    def cleanup(self):
+        """Clean up temporary files."""
+        import shutil
+        if self._temp_dir:
+            try:
+                shutil.rmtree(self._temp_dir)
+                _LOGGER.info("TTS: Cleaned up temp files")
+            except Exception as e:
+                _LOGGER.warning(f"TTS: Failed to clean up temp files: {e}")
+            self._temp_dir = None
+
+    @staticmethod
+    def list_voices():
+        """List available TTS voice presets."""
+        return list(TTS_VOICES.keys())
+
 
 @dataclass
 class VivintWebRTCConfig:
@@ -72,6 +172,107 @@ class VivintWebRTCConfig:
     app_uuid: str = field(default_factory=lambda: str(uuid.uuid4()))
     firebase_db_url: str = FIREBASE_DB_URL
     audio_device: str = None  # Windows: "Microphone (Name)" for dshow capture
+    # Pre-fetched credentials (set by prefetch_webrtc_credentials)
+    prefetched_firebase_token: str = None
+    prefetched_firebase_id_token: str = None
+    prefetched_firebase_uid: str = None
+    # TTS mode: set tts_audio_file to use TTS instead of microphone
+    tts_audio_file: str = None  # Path to pre-generated TTS audio file
+    tts_voice_id: str = TTS_DEFAULT_VOICE  # Eleven Labs voice ID to use
+
+
+@dataclass
+class PrefetchedCredentials:
+    """Pre-fetched Firebase credentials for faster PTT connection."""
+    firebase_token: str  # Firebase custom token
+    firebase_id_token: str  # Firebase ID token
+    firebase_uid: str  # Firebase user ID
+    firebase_db_url: str  # Signaling server URL
+    system_id: str  # Vivint system ID
+
+
+async def prefetch_webrtc_credentials(oauth_token: str, camera_uuid: str) -> PrefetchedCredentials:
+    """
+    Pre-fetch Firebase credentials for faster WebRTC connection.
+
+    Call this when the app starts to reduce PTT latency.
+    Returns credentials that can be passed to VivintWebRTCConfig.
+
+    Args:
+        oauth_token: Vivint OAuth id_token
+        camera_uuid: Camera device UUID
+
+    Returns:
+        PrefetchedCredentials with tokens ready for use
+    """
+    import httpx
+
+    _LOGGER.info("Pre-fetching WebRTC credentials...")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        # Step 1: Exchange Vivint token for Firebase custom token
+        headers = {
+            "Authorization": f"Bearer {oauth_token}",
+            "User-Agent": "okhttp/4.12.0",
+            "Accept": "application/json",
+        }
+        response = await client.get(FIREBASE_TOKEN_URL, headers=headers)
+        if response.status_code != 200:
+            raise Exception(f"Failed to get Firebase token: {response.status_code}")
+
+        data = response.json()
+        firebase_token = data.get("custom-token")
+        if not firebase_token:
+            raise Exception("No custom-token in response")
+
+        _LOGGER.info("Pre-fetch: Got Firebase custom token")
+
+        # Parse JWT claims for system ID and signaling server
+        system_id = ""
+        firebase_db_url = FIREBASE_DB_URL
+        firebase_uid = ""
+
+        try:
+            parts = firebase_token.split('.')
+            if len(parts) >= 2:
+                payload = parts[1]
+                payload += '=' * (4 - len(payload) % 4)
+                decoded = base64.urlsafe_b64decode(payload)
+                claims = json.loads(decoded)
+
+                firebase_uid = claims.get("uid", "")
+                nested_claims = claims.get("claims", {})
+                sig_servers = nested_claims.get("sig_server", {})
+
+                if sig_servers:
+                    system_id, firebase_db_url = next(iter(sig_servers.items()))
+                    _LOGGER.info(f"Pre-fetch: Using signaling server for system {system_id}")
+        except Exception as e:
+            _LOGGER.warning(f"Pre-fetch: Failed to parse token claims: {e}")
+
+        # Step 2: Exchange custom token for Firebase ID token
+        url = f"{FIREBASE_AUTH_URL}?key={FIREBASE_SIGNAL_API_KEY}"
+        payload = {"token": firebase_token, "returnSecureToken": True}
+        response = await client.post(url, json=payload)
+
+        if response.status_code == 200:
+            data = response.json()
+            firebase_id_token = data.get("idToken", firebase_token)
+            firebase_uid = data.get("localId", firebase_uid)
+            _LOGGER.info(f"Pre-fetch: Got Firebase ID token! UID: {firebase_uid}")
+        else:
+            firebase_id_token = firebase_token
+            _LOGGER.info("Pre-fetch: Using custom token as ID token")
+
+    _LOGGER.info("Pre-fetch: Credentials ready!")
+
+    return PrefetchedCredentials(
+        firebase_token=firebase_token,
+        firebase_id_token=firebase_id_token,
+        firebase_uid=firebase_uid,
+        firebase_db_url=firebase_db_url,
+        system_id=system_id,
+    )
 
 
 class DataChannelProtocol:
@@ -481,9 +682,6 @@ class FirebaseWebSocketSignaler:
 
     def __init__(self, config: VivintWebRTCConfig):
         self.config = config
-        self.firebase_token: Optional[str] = None
-        self.firebase_id_token: Optional[str] = None
-        self.firebase_uid: Optional[str] = None
         self._http_client: Optional[httpx.AsyncClient] = None
         self._ws: Optional[WebSocketClientProtocol] = None
         self._listener_task: Optional[asyncio.Task] = None
@@ -493,6 +691,14 @@ class FirebaseWebSocketSignaler:
         self._pending_requests: dict = {}
         self._connected = asyncio.Event()
         self._authenticated = asyncio.Event()
+
+        # Use pre-fetched credentials if available
+        self.firebase_token: Optional[str] = config.prefetched_firebase_token
+        self.firebase_id_token: Optional[str] = config.prefetched_firebase_id_token
+        self.firebase_uid: Optional[str] = config.prefetched_firebase_uid
+
+        if self.firebase_token:
+            _LOGGER.info("Using pre-fetched Firebase credentials")
 
         # Callbacks
         self.on_remote_sdp: Optional[Callable[[str, str, str], None]] = None
@@ -530,6 +736,12 @@ class FirebaseWebSocketSignaler:
 
     async def get_firebase_token(self) -> str:
         """Exchange Vivint OAuth token for Firebase custom token."""
+        # Skip if we already have a pre-fetched token
+        if self.firebase_token:
+            _LOGGER.info("Using pre-fetched Firebase custom token")
+            self._parse_firebase_token_claims()
+            return self.firebase_token
+
         _LOGGER.info("Exchanging Vivint token for Firebase custom token...")
 
         client = await self._get_http_client()
@@ -603,6 +815,11 @@ class FirebaseWebSocketSignaler:
 
     async def sign_in_firebase(self) -> str:
         """Get Firebase ID token (for fallback REST API use)."""
+        # Skip if we already have a pre-fetched ID token
+        if self.firebase_id_token:
+            _LOGGER.info(f"Using pre-fetched Firebase ID token! UID: {self.firebase_uid}")
+            return self.firebase_id_token
+
         if not self.firebase_token:
             await self.get_firebase_token()
 
@@ -666,7 +883,7 @@ class FirebaseWebSocketSignaler:
         try:
             self._ws = await websockets.connect(
                 ws_url,
-                extra_headers={
+                additional_headers={
                     "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12)",
                 },
                 ping_interval=30,  # Send WebSocket ping every 30 seconds
@@ -962,6 +1179,241 @@ class FirebaseWebSocketSignaler:
         asyncio.create_task(self.listen_for_messages())
 
 
+class IncomingAudioProcessor:
+    """
+    Processes incoming audio from doorbell camera and forwards to callbacks.
+
+    Used to pipe audio from WebRTC to Gemini Live for real-time conversation.
+    """
+
+    def __init__(self):
+        self._callbacks: list[Callable[[bytes], None]] = []
+        self._running = False
+        self._process_task: Optional[asyncio.Task] = None
+
+    def add_callback(self, callback: Callable[[bytes], None]):
+        """Add a callback to receive audio chunks (16kHz PCM)."""
+        self._callbacks.append(callback)
+
+    def remove_callback(self, callback: Callable[[bytes], None]):
+        """Remove an audio callback."""
+        if callback in self._callbacks:
+            self._callbacks.remove(callback)
+
+    async def process_track(self, track: MediaStreamTrack):
+        """
+        Process an incoming audio track and forward to callbacks.
+
+        Args:
+            track: aiortc MediaStreamTrack (audio)
+        """
+        _LOGGER.info(f"Starting incoming audio processor for track: {track.kind}, id={track.id}")
+        _LOGGER.info(f"Track readyState: {track.readyState if hasattr(track, 'readyState') else 'unknown'}")
+        self._running = True
+
+        try:
+            while self._running:
+                try:
+                    # Get audio frame from track
+                    frame = await asyncio.wait_for(track.recv(), timeout=1.0)
+
+                    # Convert to raw PCM bytes
+                    # aiortc frames are av.AudioFrame, need to extract samples
+                    if hasattr(frame, 'to_ndarray'):
+                        # Get samples as numpy array
+                        samples = frame.to_ndarray()
+                        # Convert to bytes (assuming 16-bit PCM)
+                        audio_bytes = samples.tobytes()
+
+                        # Log occasionally to track incoming audio
+                        if not hasattr(self, '_recv_count'):
+                            self._recv_count = 0
+                        self._recv_count += 1
+                        if self._recv_count % 50 == 1:
+                            _LOGGER.info(f"Received audio frame #{self._recv_count} from doorbell ({len(audio_bytes)} bytes)")
+
+                        # Forward to all callbacks
+                        for callback in self._callbacks:
+                            try:
+                                if asyncio.iscoroutinefunction(callback):
+                                    await callback(audio_bytes)
+                                else:
+                                    callback(audio_bytes)
+                            except Exception as e:
+                                _LOGGER.error(f"Audio callback error: {e}")
+
+                except asyncio.TimeoutError:
+                    # Log to show we're waiting for audio from doorbell
+                    if not hasattr(self, '_timeout_count'):
+                        self._timeout_count = 0
+                    self._timeout_count += 1
+                    if self._timeout_count % 5 == 1:  # Log every 5 seconds
+                        _LOGGER.warning(f"Incoming audio: {self._timeout_count} timeouts, waiting for doorbell mic (track.readyState={getattr(track, 'readyState', 'unknown')})")
+                    continue
+                except Exception as e:
+                    if "Connection" in str(e) or "closed" in str(e).lower():
+                        break
+                    _LOGGER.error(f"Error processing audio frame: {e}")
+
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._running = False
+            _LOGGER.info("Incoming audio processor stopped")
+
+    def stop(self):
+        """Stop processing audio."""
+        self._running = False
+
+
+class TTSAudioTrack(MediaStreamTrack):
+    """
+    Custom audio track that plays queued TTS audio.
+
+    Allows dynamic injection of TTS audio into WebRTC stream.
+    Must match MediaPlayer output format: 48kHz stereo s16 for proper encoding.
+    """
+
+    kind = "audio"
+
+    def __init__(self, sample_rate: int = 48000, channels: int = 2):
+        super().__init__()
+        from fractions import Fraction
+        self._sample_rate = sample_rate
+        self._channels = channels
+        self._audio_queue: asyncio.Queue[bytes] = asyncio.Queue()
+        self._current_buffer = b""
+        self._pts = 0
+        self._samples_per_frame = 960  # 20ms at 48kHz (matches Opus encoder expectation)
+        self._time_base = Fraction(1, sample_rate)
+        self._frame_duration = self._samples_per_frame / self._sample_rate  # 0.02s (20ms)
+        self._start_time = None  # Set on first recv() call
+
+    async def queue_audio(self, audio_data: bytes):
+        """
+        Queue audio data to be played.
+
+        Args:
+            audio_data: PCM audio bytes (48kHz, 16-bit, stereo)
+                       Each sample is 4 bytes (2 bytes per channel)
+        """
+        import numpy as np
+
+        # Log detailed audio characteristics
+        samples = np.frombuffer(audio_data, dtype=np.int16)
+        max_amp = np.max(np.abs(samples)) if len(samples) > 0 else 0
+        _LOGGER.info(f"TTSAudioTrack.queue_audio: {len(audio_data)} bytes, {len(samples)} samples, max_amplitude={max_amp}")
+
+        await self._audio_queue.put(audio_data)
+        _LOGGER.info(f"TTSAudioTrack queue size now: {self._audio_queue.qsize()}")
+
+    async def recv(self):
+        """Generate next audio frame (called by aiortc)."""
+        import av
+        import numpy as np
+        import time
+
+        # Initialize timing on first call
+        if self._start_time is None:
+            self._start_time = time.time()
+
+        # Pacing: calculate when this frame should be generated
+        # This is critical for proper WebRTC audio streaming
+        if not hasattr(self, '_audio_frame_count'):
+            self._audio_frame_count = 0
+            self._real_audio_count = 0
+            self._silence_count = 0
+
+        expected_time = self._start_time + (self._audio_frame_count * self._frame_duration)
+        current_time = time.time()
+        wait_time = expected_time - current_time
+
+        if wait_time > 0:
+            await asyncio.sleep(wait_time)
+
+        self._audio_frame_count += 1
+
+        # Calculate bytes needed per frame (16-bit samples)
+        bytes_per_frame = self._samples_per_frame * 2 * self._channels
+
+        # Drain all available audio from queue into buffer
+        while True:
+            try:
+                chunk = self._audio_queue.get_nowait()
+                self._current_buffer += chunk
+            except asyncio.QueueEmpty:
+                break
+
+        # Track if we're sending actual audio or silence
+        has_audio_data = len(self._current_buffer) >= bytes_per_frame
+
+        # If buffer is too small, pad with silence
+        if len(self._current_buffer) < bytes_per_frame:
+            silence_needed = bytes_per_frame - len(self._current_buffer)
+            self._current_buffer += bytes(silence_needed)
+
+        # Extract frame data
+        frame_data = self._current_buffer[:bytes_per_frame]
+        self._current_buffer = self._current_buffer[bytes_per_frame:]
+
+        # Log recv() call rate periodically (now should be ~50/second with pacing)
+        if self._audio_frame_count % 100 == 1:
+            _LOGGER.info(f"TTSAudioTrack.recv() frame {self._audio_frame_count} (real={self._real_audio_count}, silence={self._silence_count})")
+
+        if has_audio_data:
+            self._real_audio_count += 1
+            if self._real_audio_count % 20 == 1:
+                _LOGGER.info(f"TTSAudioTrack: Sending audio frame #{self._real_audio_count} (buffer: {len(self._current_buffer)} bytes remaining)")
+        else:
+            self._silence_count += 1
+
+        # Convert to numpy array (16-bit signed)
+        samples = np.frombuffer(frame_data, dtype=np.int16)
+
+        # Log amplitude to debug Opus encoding issue
+        if has_audio_data:
+            max_amp = np.max(np.abs(samples))
+            if self._real_audio_count % 20 == 1:
+                _LOGGER.info(f"TTSAudioTrack: Frame amplitude max={max_amp}, samples shape={samples.shape}")
+
+        # For packed s16 format, PyAV expects shape (1, samples * channels)
+        # The data is interleaved: [L0, R0, L1, R1, ...] for stereo
+        samples = samples.reshape(1, -1)
+
+        # Create av.AudioFrame
+        frame = av.AudioFrame.from_ndarray(
+            samples,
+            format='s16',
+            layout='stereo' if self._channels == 2 else 'mono'
+        )
+        frame.sample_rate = self._sample_rate
+        frame.pts = self._pts
+        frame.time_base = self._time_base
+
+        self._pts += self._samples_per_frame
+
+        return frame
+
+    def clear_queue(self):
+        """Clear any pending audio and reset timing."""
+        while not self._audio_queue.empty():
+            try:
+                self._audio_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        self._current_buffer = b""
+
+    def reset_timing(self):
+        """Reset timing for fresh audio playback."""
+        import time
+        self._start_time = time.time()
+        self._audio_frame_count = 0
+        self._real_audio_count = 0
+        self._silence_count = 0
+        self._pts = 0
+        _LOGGER.info("TTSAudioTrack timing reset")
+
+
 class VivintWebRTCClient:
     """
     WebRTC client for two-way audio with Vivint cameras.
@@ -1006,6 +1458,11 @@ class VivintWebRTCClient:
 
         # Audio device configuration (Windows DirectShow)
         self.audio_device = config.audio_device if hasattr(config, 'audio_device') else None
+
+        # AI conversation support
+        self.incoming_audio_processor = IncomingAudioProcessor()
+        self.tts_track: Optional[TTSAudioTrack] = None
+        self._use_tts_track = False  # Set to True to use TTSAudioTrack instead of file/mic
 
     def _create_rtc_configuration(self) -> RTCConfiguration:
         """Create RTCConfiguration with STUN/TURN servers."""
@@ -1064,14 +1521,20 @@ class VivintWebRTCClient:
             self.data_channel.on("open", self._on_data_channel_open)
             self.data_channel.on("message", self._on_data_channel_message)
 
-            # Step 6b: Set up audio track if device specified
-            if self.audio_device:
+            # Step 6b: Set up audio track if device specified, TTS file, or AI mode enabled
+            if self.audio_device or self._use_tts_track or self.config.tts_audio_file:
                 await self._setup_audio_track()
 
             # Step 7: Create and send offer
             _LOGGER.info("Creating SDP offer...")
             offer = await self.pc.createOffer()
             await self.pc.setLocalDescription(offer)
+
+            # Debug: Log our offer's audio direction
+            _LOGGER.info("=== SDP OFFER CREATED ===")
+            for line in offer.sdp.split('\n'):
+                if 'm=audio' in line or 'a=sendrecv' in line or 'a=recvonly' in line or 'a=sendonly' in line:
+                    _LOGGER.info(f"SDP offer audio: {line.strip()}")
 
             # Wait a bit for TURN allocation to complete
             await asyncio.sleep(5)
@@ -1121,10 +1584,25 @@ class VivintWebRTCClient:
                 _LOGGER.warning(f"Ignoring answer with different transaction UUID")
                 return
 
+            # Debug: Log SDP answer audio section
+            _LOGGER.info("=== SDP ANSWER RECEIVED ===")
+            for line in sdp.split('\n'):
+                if 'm=audio' in line or 'a=sendrecv' in line or 'a=recvonly' in line or 'a=sendonly' in line or 'a=inactive' in line:
+                    _LOGGER.info(f"SDP audio line: {line.strip()}")
+
             answer = RTCSessionDescription(sdp=sdp, type="answer")
             await self.pc.setRemoteDescription(answer)
             self._answer_received.set()
             _LOGGER.info("Remote description set")
+
+            # Debug: Log transceiver states after setting remote description
+            if self.pc:
+                for i, transceiver in enumerate(self.pc.getTransceivers()):
+                    _LOGGER.info(f"Transceiver {i}: kind={transceiver.kind}, direction={transceiver.direction}, currentDirection={transceiver.currentDirection}")
+                    if transceiver.receiver:
+                        _LOGGER.info(f"  Receiver: track={transceiver.receiver.track}")
+                    else:
+                        _LOGGER.warning(f"  Receiver: None")
 
         elif sdp_type == "offer":
             # Camera sent us an offer - we need to create an answer
@@ -1208,10 +1686,37 @@ class VivintWebRTCClient:
             await asyncio.sleep(0.05)
 
     async def _setup_audio_track(self):
-        """Set up audio track from microphone for two-way audio."""
+        """Set up audio track from microphone, TTS file, or AI TTS for two-way audio."""
         import platform
 
         try:
+            # AI conversation mode - use TTSAudioTrack for dynamic TTS playback
+            if self._use_tts_track:
+                # Use 48kHz stereo to match MediaPlayer/Opus encoder requirements
+                _LOGGER.info("AI conversation mode: Using TTSAudioTrack for dynamic TTS (48kHz stereo)")
+                self.tts_track = TTSAudioTrack(sample_rate=48000, channels=2)
+                self.audio_track = self.tts_track
+
+                # Use addTrack() like the working microphone mode does
+                # This matches how MediaPlayer audio tracks are added
+                self.audio_sender = self.pc.addTrack(self.audio_track)
+                _LOGGER.info("TTSAudioTrack added to PeerConnection (using addTrack)")
+                return
+
+            # Check if TTS mode (play audio file instead of microphone)
+            if self.config.tts_audio_file:
+                _LOGGER.info(f"TTS mode: Playing audio file {self.config.tts_audio_file}")
+                self.media_player = MediaPlayer(self.config.tts_audio_file)
+
+                if self.media_player.audio:
+                    self.audio_track = self.media_player.audio
+                    self.audio_sender = self.pc.addTrack(self.audio_track)
+                    _LOGGER.info("TTS audio track added to PeerConnection")
+                else:
+                    _LOGGER.warning("TTS MediaPlayer has no audio track")
+                return
+
+            # Normal microphone mode
             if platform.system() == "Windows":
                 # Windows DirectShow audio capture
                 device_url = f"audio={self.audio_device}"
@@ -1310,8 +1815,13 @@ class VivintWebRTCClient:
                 _LOGGER.info("Two-way talk ended (confirmed by camera)")
 
     def _on_track(self, track):
-        """Handle incoming media track."""
+        """Handle incoming media track (audio/video from doorbell)."""
         _LOGGER.info(f"Received track: {track.kind}")
+
+        if track.kind == "audio":
+            # Note: We don't use WebRTC for incoming audio - RTSP stream has audio
+            # WebRTC is only used for OUTGOING audio (Gemini voice to doorbell speaker)
+            _LOGGER.info(f"Received WebRTC audio track (ignored - using RTSP for incoming audio)")
 
     async def start_two_way_talk(self, wait_for_channel: bool = True) -> bool:
         """Start two-way audio session."""
@@ -1341,6 +1851,9 @@ class VivintWebRTCClient:
         self.two_way_active = True
         _LOGGER.info("TwoWayTalkStart sent!")
 
+        # Note: Incoming audio processing is started immediately in _on_track
+        # so we don't need to start it again here
+
         # Debug: Check audio sender status
         if self.audio_sender:
             _LOGGER.info(f"Audio sender track: {self.audio_sender.track}")
@@ -1355,26 +1868,26 @@ class VivintWebRTCClient:
         return True
 
     async def _monitor_audio_stats(self):
-        """Monitor audio transmission stats periodically."""
+        """Monitor audio transmission and reception stats periodically."""
         _LOGGER.info("Starting audio stats monitoring...")
-        last_packets = 0
-        for i in range(10):  # Monitor for 10 seconds
+        last_tx_packets = 0
+        last_rx_packets = 0
+        for i in range(30):  # Monitor for 30 seconds
             await asyncio.sleep(1)
             if not self.two_way_active or not self.pc:
                 _LOGGER.info(f"Stats monitor stopping: two_way_active={self.two_way_active}, pc={self.pc is not None}")
                 break
             try:
                 stats = await self.pc.getStats()
-                # Look for outbound RTP stats
-                found = False
+                tx_found = False
+                rx_found = False
+
                 for key, value in stats.items():
-                    # aiortc stats: key contains type, value is RTCStats object
+                    # Check outbound RTP (our audio to doorbell)
                     if 'outbound-rtp' in key:
-                        # Log full stats on first iteration
                         if i == 0:
                             _LOGGER.info(f"Outbound RTP stats ({key}): {value}")
 
-                        # RTCStats might be object or dict
                         if hasattr(value, 'packetsSent'):
                             packets = value.packetsSent
                             bytes_sent = value.bytesSent
@@ -1385,14 +1898,38 @@ class VivintWebRTCClient:
                             packets = 0
                             bytes_sent = 0
 
-                        packets_delta = packets - last_packets
+                        packets_delta = packets - last_tx_packets
                         _LOGGER.info(f"Audio TX: {packets} pkts (+{packets_delta}/s), {bytes_sent} bytes")
-                        last_packets = packets
-                        found = True
-                        break
+                        last_tx_packets = packets
+                        tx_found = True
 
-                if not found and i == 0:
-                    _LOGGER.warning(f"No outbound-rtp stats found. Available: {list(stats.keys())}")
+                    # Check inbound RTP (doorbell audio to us)
+                    if 'inbound-rtp' in key:
+                        if i == 0:
+                            _LOGGER.info(f"Inbound RTP stats ({key}): {value}")
+
+                        if hasattr(value, 'packetsReceived'):
+                            packets = value.packetsReceived
+                            bytes_recv = value.bytesReceived
+                        elif isinstance(value, dict):
+                            packets = value.get('packetsReceived', 0)
+                            bytes_recv = value.get('bytesReceived', 0)
+                        else:
+                            packets = 0
+                            bytes_recv = 0
+
+                        packets_delta = packets - last_rx_packets
+                        if packets > 0 or i < 5:  # Always log first 5 seconds or if packets received
+                            _LOGGER.info(f"Audio RX: {packets} pkts (+{packets_delta}/s), {bytes_recv} bytes")
+                        last_rx_packets = packets
+                        rx_found = True
+
+                if i == 0:
+                    if not tx_found:
+                        _LOGGER.warning(f"No outbound-rtp stats found")
+                    if not rx_found:
+                        _LOGGER.warning(f"No inbound-rtp stats found - doorbell may not be sending audio")
+                    _LOGGER.info(f"Available stats keys: {list(stats.keys())}")
 
             except Exception as e:
                 _LOGGER.error(f"Stats error: {e}")
@@ -1414,12 +1951,124 @@ class VivintWebRTCClient:
         _LOGGER.info("TwoWayTalkEnd sent!")
         return True
 
+    # =========================================================================
+    # AI Agent Integration Methods
+    # =========================================================================
+
+    def enable_ai_conversation_mode(self):
+        """
+        Enable AI conversation mode for dynamic TTS playback.
+
+        Call this BEFORE connect() to use TTSAudioTrack instead of microphone.
+        """
+        self._use_tts_track = True
+        _LOGGER.info("AI conversation mode enabled")
+
+    def set_audio_callback(self, callback: Callable[[bytes], None]):
+        """
+        Set callback to receive incoming audio from doorbell.
+
+        The callback receives PCM audio bytes (16kHz, 16-bit).
+        Use this to pipe audio to Gemini Live or other speech recognition.
+
+        Args:
+            callback: Async or sync function receiving audio bytes
+        """
+        self.incoming_audio_processor.add_callback(callback)
+
+    def remove_audio_callback(self, callback: Callable[[bytes], None]):
+        """Remove an audio callback."""
+        self.incoming_audio_processor.remove_callback(callback)
+
+    async def speak(self, text: str) -> bool:
+        """
+        Speak text through the doorbell using TTS.
+
+        Generates audio using ElevenLabs and queues it for playback.
+        Only works in AI conversation mode (enable_ai_conversation_mode).
+
+        Args:
+            text: Text to speak
+
+        Returns:
+            True if audio was queued successfully
+        """
+        if not self.tts_track:
+            _LOGGER.warning("speak() requires AI conversation mode - call enable_ai_conversation_mode() before connect()")
+            return False
+
+        try:
+            from elevenlabs import AsyncElevenLabs
+            import os
+
+            api_key = os.getenv("ELEVEN_LABS_API_KEY")
+            voice_id = os.getenv("ELEVEN_LABS_VOICE_ID", TTS_DEFAULT_VOICE)
+
+            if not api_key:
+                _LOGGER.error("ELEVEN_LABS_API_KEY not set")
+                return False
+
+            client = AsyncElevenLabs(api_key=api_key)
+
+            _LOGGER.info(f"Generating TTS for: {text[:50]}...")
+
+            # Generate audio (PCM 16kHz for WebRTC)
+            # Returns async generator, not coroutine
+            audio_generator = client.text_to_speech.convert(
+                voice_id=voice_id,
+                model_id="eleven_turbo_v2_5",
+                text=text,
+                output_format="pcm_16000",  # 16kHz PCM mono
+            )
+
+            # Collect audio data
+            audio_data = b""
+            async for chunk in audio_generator:
+                audio_data += chunk
+
+            _LOGGER.info(f"TTS generated {len(audio_data)} bytes, queuing for playback")
+
+            # Queue audio for playback
+            await self.tts_track.queue_audio(audio_data)
+            return True
+
+        except Exception as e:
+            _LOGGER.error(f"TTS error: {e}")
+            return False
+
+    async def queue_audio(self, audio_data: bytes):
+        """
+        Queue raw audio data for playback through doorbell.
+
+        Args:
+            audio_data: PCM audio bytes (48kHz, 16-bit, stereo)
+        """
+        if not self.tts_track:
+            _LOGGER.warning("queue_audio() called but tts_track is None - AI conversation mode not enabled?")
+            return
+
+        _LOGGER.info(f"VivintWebRTCClient.queue_audio: forwarding {len(audio_data)} bytes to TTSAudioTrack")
+        await self.tts_track.queue_audio(audio_data)
+
+    def clear_audio_queue(self):
+        """Clear any pending audio in the playback queue."""
+        if self.tts_track:
+            self.tts_track.clear_queue()
+
     async def disconnect(self):
         """Disconnect WebRTC session."""
         _LOGGER.info("Disconnecting WebRTC...")
 
         if self.two_way_active:
             await self.stop_two_way_talk()
+
+        # Stop incoming audio processor
+        self.incoming_audio_processor.stop()
+
+        # Clean up TTS track
+        if self.tts_track:
+            self.tts_track.stop()
+            self.tts_track = None
 
         # Clean up media player
         if self.media_player:
@@ -1428,8 +2077,9 @@ class VivintWebRTCClient:
             except Exception as e:
                 _LOGGER.debug(f"Error stopping media player: {e}")
             self.media_player = None
-            self.audio_track = None
-            self.audio_sender = None
+
+        self.audio_track = None
+        self.audio_sender = None
 
         if self.data_channel:
             self.data_channel.close()
@@ -1510,12 +2160,14 @@ async def get_vivint_token_and_camera():
     return access_token, camera_uuid
 
 
-async def test_connection(audio_device: str = None):
+async def test_connection(audio_device: str = None, ai_conversation: bool = False, duration: int = 60):
     """Test the WebRTC connection to a Vivint camera.
 
     Args:
         audio_device: Windows DirectShow audio device name (e.g., "Microphone (Realtek Audio)")
                       Use --list-audio to see available devices.
+        ai_conversation: If True, enable AI-powered conversation with Gemini
+        duration: Test duration in seconds (for AI mode)
     """
     _LOGGER.info("="*60)
     _LOGGER.info("Vivint WebRTC Two-Way Audio - Connection Test")
@@ -1552,6 +2204,11 @@ async def test_connection(audio_device: str = None):
     # Create client and connect
     client = VivintWebRTCClient(config)
 
+    # Enable AI conversation mode if requested
+    if ai_conversation:
+        _LOGGER.info("AI conversation mode enabled")
+        client.enable_ai_conversation_mode()
+
     try:
         if await client.connect():
             _LOGGER.info("")
@@ -1563,14 +2220,141 @@ async def test_connection(audio_device: str = None):
             if await client.start_two_way_talk():
                 _LOGGER.info("")
                 _LOGGER.info("Two-way talk active!")
-                _LOGGER.info("Press Ctrl+C to stop...")
 
-                try:
-                    # Keep connection alive
-                    while client.connected:
-                        await asyncio.sleep(1)
-                except KeyboardInterrupt:
-                    pass
+                if ai_conversation:
+                    # Start AI-powered conversation
+                    from doorbell_agent import DoorbellAgent
+
+                    # Load stored credentials (API keys)
+                    try:
+                        from vivint_client import load_credentials
+                        import os
+                        creds = load_credentials() or {}
+                        if creds.get('gemini_api_key') and not os.getenv('GEMINI_API_KEY'):
+                            os.environ['GEMINI_API_KEY'] = creds['gemini_api_key']
+                    except Exception as e:
+                        _LOGGER.warning(f"Could not load stored credentials: {e}")
+
+                    agent = DoorbellAgent()
+                    # Must start conversation (Gemini session) first
+                    if not await agent.start_conversation():
+                        _LOGGER.error("Failed to start Gemini session")
+                    elif await agent.connect_to_webrtc(client):
+                        _LOGGER.info("AI conversation active!")
+                        _LOGGER.info(f"Test duration: {duration}s (Press Ctrl+C to stop)")
+
+                        try:
+                            # Run for specified duration
+                            await asyncio.sleep(duration)
+                        except KeyboardInterrupt:
+                            pass
+                        finally:
+                            await agent.end_conversation()
+                    else:
+                        _LOGGER.error("Failed to connect DoorbellAgent")
+                else:
+                    _LOGGER.info("Press Ctrl+C to stop...")
+                    try:
+                        # Keep connection alive
+                        while client.connected:
+                            await asyncio.sleep(1)
+                    except KeyboardInterrupt:
+                        pass
+
+            await client.stop_two_way_talk()
+        else:
+            _LOGGER.error("Connection failed")
+
+    finally:
+        await client.disconnect()
+
+
+async def test_sine_wave(duration: int = 10, frequency: int = 880):
+    """
+    Test TTSAudioTrack by generating a sine wave directly.
+
+    This bypasses Gemini to isolate whether TTSAudioTrack works.
+    If you hear the tone, TTSAudioTrack is working and the issue is
+    with Gemini audio format. If you don't hear the tone, TTSAudioTrack
+    itself has issues.
+
+    Args:
+        duration: How long to play the tone in seconds
+        frequency: Frequency of sine wave in Hz (default 880 = A5)
+    """
+    import numpy as np
+
+    _LOGGER.info("="*60)
+    _LOGGER.info("TTSAudioTrack Sine Wave Test")
+    _LOGGER.info("="*60)
+    _LOGGER.info(f"This will generate a {frequency}Hz tone for {duration} seconds")
+    _LOGGER.info("through TTSAudioTrack (bypassing Gemini)")
+    _LOGGER.info("")
+
+    # Get token and camera from Vivint
+    access_token, camera_uuid = await get_vivint_token_and_camera()
+
+    if not access_token:
+        _LOGGER.error("Could not get Vivint access token")
+        return
+
+    # Create WebRTC config
+    config = VivintWebRTCConfig(
+        oauth_token=access_token,
+        camera_uuid=camera_uuid,
+    )
+
+    # Create client with TTSAudioTrack
+    client = VivintWebRTCClient(config)
+    client.enable_ai_conversation_mode()  # Use TTSAudioTrack
+
+    try:
+        if await client.connect():
+            _LOGGER.info("Connected!")
+
+            if await client.start_two_way_talk():
+                _LOGGER.info("Two-way talk active!")
+
+                # Wait a moment for aiortc to finish its initial buffering
+                _LOGGER.info("Waiting 2 seconds for WebRTC to stabilize...")
+                await asyncio.sleep(2)
+
+                # Reset TTSAudioTrack timing for fresh playback
+                if client.tts_track:
+                    client.tts_track.clear_queue()
+                    client.tts_track.reset_timing()
+                    _LOGGER.info("TTSAudioTrack ready for audio")
+
+                _LOGGER.info("Generating sine wave...")
+
+                # Generate sine wave audio (48kHz, stereo, 16-bit)
+                sample_rate = 48000
+                num_samples = sample_rate * duration
+                t = np.linspace(0, duration, num_samples, dtype=np.float32)
+
+                # Generate sine wave
+                amplitude = 0.8  # 80% of max to avoid clipping
+                samples = (amplitude * 32767 * np.sin(2 * np.pi * frequency * t)).astype(np.int16)
+
+                # Convert mono to stereo
+                stereo = np.column_stack((samples, samples)).flatten()
+                audio_bytes = stereo.astype(np.int16).tobytes()
+
+                _LOGGER.info(f"Generated {len(audio_bytes)} bytes of audio")
+                _LOGGER.info(f"Max amplitude: {np.max(np.abs(stereo))}")
+
+                # Queue the audio in chunks (like real audio would arrive)
+                chunk_size = 48000 * 4  # 1 second chunks (48kHz * 2 bytes * 2 channels)
+                for i in range(0, len(audio_bytes), chunk_size):
+                    chunk = audio_bytes[i:i + chunk_size]
+                    await client.queue_audio(chunk)
+                    _LOGGER.info(f"Queued chunk {i // chunk_size + 1} ({len(chunk)} bytes)")
+
+                # Wait for audio to play
+                _LOGGER.info(f"Waiting {duration + 2} seconds for audio to play...")
+                await asyncio.sleep(duration + 2)
+
+                _LOGGER.info("Test complete! Did you hear the tone?")
 
             await client.stop_two_way_talk()
         else:
@@ -1683,6 +2467,109 @@ def list_audio_devices():
     _LOGGER.info("="*60)
 
 
+async def speak_through_doorbell(text: str, oauth_token: str = None, camera_uuid: str = None,
+                                  voice_id: str = None,
+                                  prefetched_credentials: 'PrefetchedCredentials' = None) -> bool:
+    """
+    Speak text through the doorbell using Eleven Labs Turbo v2.5 TTS.
+
+    This generates speech from text and sends it through WebRTC to the doorbell.
+    Requires ELEVEN_LABS_API_KEY environment variable to be set.
+
+    Args:
+        text: Text to speak
+        oauth_token: Vivint OAuth token (fetched automatically if not provided)
+        camera_uuid: Camera UUID (fetched automatically if not provided)
+        voice_id: Eleven Labs voice ID (default: Jarnathan)
+        prefetched_credentials: Pre-fetched Firebase credentials for faster connection
+
+    Returns:
+        True if successful, False otherwise
+
+    Example:
+        await speak_through_doorbell("Hello! I'll be right there.")
+    """
+    # Get credentials if not provided
+    if not oauth_token or not camera_uuid:
+        oauth_token, camera_uuid = await get_vivint_token_and_camera()
+        if not oauth_token or not camera_uuid:
+            _LOGGER.error("Could not get Vivint credentials for TTS")
+            return False
+
+    # Generate TTS audio using Cartesia
+    tts = TTSEngine(voice_id=voice_id)
+    try:
+        audio_file = await tts.generate_speech(text)
+        _LOGGER.info(f"TTS audio generated: {audio_file}")
+
+        # Build config
+        config_kwargs = {
+            'oauth_token': oauth_token,
+            'camera_uuid': camera_uuid,
+            'tts_audio_file': audio_file,
+        }
+
+        if prefetched_credentials:
+            config_kwargs.update({
+                'prefetched_firebase_token': prefetched_credentials.firebase_token,
+                'prefetched_firebase_id_token': prefetched_credentials.firebase_id_token,
+                'prefetched_firebase_uid': prefetched_credentials.firebase_uid,
+                'firebase_db_url': prefetched_credentials.firebase_db_url,
+                'system_id': prefetched_credentials.system_id,
+            })
+
+        config = VivintWebRTCConfig(**config_kwargs)
+
+        # Connect and speak
+        client = VivintWebRTCClient(config)
+
+        try:
+            if await client.connect():
+                _LOGGER.info("TTS: WebRTC connected")
+
+                if await client.start_two_way_talk():
+                    _LOGGER.info(f"TTS: Speaking: '{text}'")
+
+                    # Wait for audio to play (estimate based on text length)
+                    # Approximate speaking rate: ~150 words per minute
+                    word_count = len(text.split())
+                    duration = max(2.0, word_count / 2.5)  # At least 2 seconds
+                    _LOGGER.info(f"TTS: Waiting {duration:.1f}s for audio to play...")
+                    await asyncio.sleep(duration)
+
+                    await client.stop_two_way_talk()
+                    _LOGGER.info("TTS: Done speaking")
+                    return True
+                else:
+                    _LOGGER.error("TTS: Failed to start two-way talk")
+            else:
+                _LOGGER.error("TTS: Failed to connect")
+
+        finally:
+            await client.disconnect()
+
+    finally:
+        tts.cleanup()
+
+    return False
+
+
+async def test_tts(text: str = "Hello! This is a test of the Vivint doorbell text to speech system."):
+    """Test TTS through the doorbell."""
+    _LOGGER.info("="*60)
+    _LOGGER.info("Vivint WebRTC TTS Test")
+    _LOGGER.info("="*60)
+    _LOGGER.info(f"Text: {text}")
+    _LOGGER.info("")
+
+    success = await speak_through_doorbell(text)
+
+    if success:
+        _LOGGER.info("TTS test successful!")
+    else:
+        _LOGGER.error("TTS test failed!")
+
+
 if __name__ == "__main__":
     import sys
 
@@ -1690,15 +2577,55 @@ if __name__ == "__main__":
         asyncio.run(show_protocol_info())
     elif "--list-audio" in sys.argv:
         list_audio_devices()
+    elif "--tts" in sys.argv:
+        # TTS mode: speak text through doorbell
+        # Usage: python vivint_webrtc.py --tts "Hello, I'll be right there!"
+        text = None
+        for i, arg in enumerate(sys.argv):
+            if arg == "--tts" and i + 1 < len(sys.argv):
+                text = sys.argv[i + 1]
+                break
+        if text:
+            asyncio.run(test_tts(text))
+        else:
+            asyncio.run(test_tts())  # Use default text
+    elif "--sine-test" in sys.argv:
+        # Sine wave test: bypass Gemini and test TTSAudioTrack directly
+        # Usage: python vivint_webrtc.py --sine-test
+        duration = 10
+        frequency = 880
+        for i, arg in enumerate(sys.argv):
+            if arg == "--duration" and i + 1 < len(sys.argv):
+                try:
+                    duration = int(sys.argv[i + 1])
+                except ValueError:
+                    pass
+            elif arg == "--frequency" and i + 1 < len(sys.argv):
+                try:
+                    frequency = int(sys.argv[i + 1])
+                except ValueError:
+                    pass
+        asyncio.run(test_sine_wave(duration=duration, frequency=frequency))
     else:
-        # Parse audio device argument
+        # Parse arguments
         audio_device = None
+        ai_conversation = "--ai-conversation" in sys.argv
+        duration = 60  # Default duration
+
         for i, arg in enumerate(sys.argv):
             if arg == "--audio" and i + 1 < len(sys.argv):
                 audio_device = sys.argv[i + 1]
-                break
+            elif arg == "--duration" and i + 1 < len(sys.argv):
+                try:
+                    duration = int(sys.argv[i + 1])
+                except ValueError:
+                    pass
 
         if audio_device:
             _LOGGER.info(f"Using audio device: {audio_device}")
 
-        asyncio.run(test_connection(audio_device=audio_device))
+        asyncio.run(test_connection(
+            audio_device=audio_device,
+            ai_conversation=ai_conversation,
+            duration=duration
+        ))

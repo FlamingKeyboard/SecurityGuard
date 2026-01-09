@@ -22,6 +22,24 @@ class WeaponDetection(BaseModel):
     description: str = Field(default="", description="Brief description if weapon detected")
 
 
+class SpeechDecision(BaseModel):
+    """Decision about whether and what to say through the doorbell speaker."""
+    should_speak: bool = Field(
+        default=False,
+        description="Whether the AI should speak through the doorbell speaker"
+    )
+    speech_intent: Literal[
+        "none", "greet", "assist", "inquire", "decline", "warn", "de_escalate", "farewell"
+    ] = Field(
+        default="none",
+        description="The purpose of speaking: none (don't speak), greet (welcome), assist (help with delivery), inquire (ask what they need), decline (politely turn away solicitors), warn (inform about monitoring), de_escalate (calm a situation), farewell (end interaction)"
+    )
+    suggested_response: str = Field(
+        default="",
+        description="What to say if should_speak is true (1-3 sentences, natural and friendly)"
+    )
+
+
 class SecurityAnalysisResponse(BaseModel):
     """Structured response schema for security analysis."""
     risk_tier: Literal["low", "medium", "high", "critical"] = Field(
@@ -52,6 +70,10 @@ class SecurityAnalysisResponse(BaseModel):
         description="Recommended action based on analysis"
     )
     summary: str = Field(description="One sentence factual summary of what is visible")
+    speech_decision: SpeechDecision = Field(
+        default_factory=lambda: SpeechDecision(should_speak=False, speech_intent="none", suggested_response=""),
+        description="Whether and what the AI should say through the doorbell speaker"
+    )
 
 
 # Base risk tier guidelines (shared between image and video prompts)
@@ -101,7 +123,36 @@ CONTEXT MATTERS:
 - Uniforms and packages suggest legitimate visitors
 - Note any vehicles, license plates if visible
 
-Be objective. Report what you SEE, not what you assume. If uncertain, err on the side of caution but note your uncertainty."""
+Be objective. Report what you SEE, not what you assume. If uncertain, err on the side of caution but note your uncertainty.
+
+SPEECH DECISION GUIDELINES:
+The doorbell has a speaker. Decide if the AI should speak and what to say.
+
+SPEAK when:
+- Doorbell was pressed or someone knocked
+- Delivery person looks unsure where to leave package
+- Someone is clearly trying to get attention
+- Suspicious activity warrants verbal warning
+- Visitor has been waiting and seems confused
+
+STAY SILENT when:
+- People just walking by on sidewalk
+- Vehicles passing or parking (unless approaching door)
+- Animals, weather, lighting changes
+- Homeowner or residents coming/going
+- Someone leaving after completing their business
+- No person detected
+
+Speech intents:
+- greet: "Hi there! How can I help you?" (friendly welcome)
+- assist: "You can leave that by the door!" (help deliveries)
+- inquire: "Can I help you with something?" (understand purpose)
+- decline: "Thanks, but we're not interested!" (turn away solicitors)
+- warn: "This property has 24/7 video monitoring." (deter suspicious behavior)
+- de_escalate: "Please step back. Everything is being recorded." (calm threats)
+- farewell: "Have a great day!" (end interaction)
+
+Keep suggested responses brief (1-2 sentences), natural, and friendly unless the situation requires firmness."""
 
 # Analysis prompt for images
 SECURITY_ANALYSIS_PROMPT = """Analyze this security camera image for a home security system. Focus on OBSERVABLE FACTS only.
@@ -153,6 +204,10 @@ class SecurityAnalysis:
     recommended_action: str
     summary: str
     raw_response: str
+    # Speech decision fields for doorbell agent
+    should_speak: bool = False
+    speech_intent: str = "none"
+    suggested_response: str = ""
 
 
 def get_gemini_api_key() -> str | None:
@@ -272,6 +327,13 @@ async def analyze_frame(
         else:
             weapon_dict = {"detected": False, "confidence": 0.0, "description": ""}
 
+        # Handle speech_decision
+        speech_data = data.get("speech_decision", {})
+        if isinstance(speech_data, dict):
+            speech_dict = speech_data
+        else:
+            speech_dict = {"should_speak": False, "speech_intent": "none", "suggested_response": ""}
+
         # Log the assistant response (async, non-blocking)
         if event_id and conversation_id:
             asyncio.create_task(log_assistant_response(
@@ -307,6 +369,9 @@ async def analyze_frame(
             recommended_action=data.get("recommended_action", "log"),
             summary=data.get("summary", ""),
             raw_response=raw_text,
+            should_speak=speech_dict.get("should_speak", False),
+            speech_intent=speech_dict.get("speech_intent", "none"),
+            suggested_response=speech_dict.get("suggested_response", ""),
         )
 
     except json.JSONDecodeError as e:
@@ -426,6 +491,13 @@ async def analyze_video(
         else:
             weapon_dict = {"detected": False, "confidence": 0.0, "description": ""}
 
+        # Handle speech_decision
+        speech_data = data.get("speech_decision", {})
+        if isinstance(speech_data, dict):
+            speech_dict = speech_data
+        else:
+            speech_dict = {"should_speak": False, "speech_intent": "none", "suggested_response": ""}
+
         # Log the assistant response (async, non-blocking)
         if event_id and conversation_id:
             asyncio.create_task(log_assistant_response(
@@ -468,6 +540,9 @@ async def analyze_video(
             recommended_action=data.get("recommended_action", "log"),
             summary=data.get("summary", ""),
             raw_response=raw_text,
+            should_speak=speech_dict.get("should_speak", False),
+            speech_intent=speech_dict.get("speech_intent", "none"),
+            suggested_response=speech_dict.get("suggested_response", ""),
         )
 
     except json.JSONDecodeError as e:
@@ -604,6 +679,13 @@ async def analyze_multiple_videos(
         else:
             weapon_dict = {"detected": False, "confidence": 0.0, "description": ""}
 
+        # Handle speech_decision
+        speech_data = data.get("speech_decision", {})
+        if isinstance(speech_data, dict):
+            speech_dict = speech_data
+        else:
+            speech_dict = {"should_speak": False, "speech_intent": "none", "suggested_response": ""}
+
         # Log the response
         if event_id and conversation_id:
             asyncio.create_task(log_assistant_response(
@@ -648,6 +730,9 @@ async def analyze_multiple_videos(
             recommended_action=data.get("recommended_action", "log"),
             summary=data.get("summary", ""),
             raw_response=raw_text,
+            should_speak=speech_dict.get("should_speak", False),
+            speech_intent=speech_dict.get("speech_intent", "none"),
+            suggested_response=speech_dict.get("suggested_response", ""),
         )
 
     except json.JSONDecodeError as e:

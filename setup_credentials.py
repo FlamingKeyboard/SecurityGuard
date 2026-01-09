@@ -6,6 +6,7 @@ This script helps you:
 2. Save refresh token for future use (avoiding MFA each time)
 3. Test RTSP camera access
 4. Optionally set up Gemini API key
+5. Optionally set up Eleven Labs API key for TTS doorbell responses
 
 All credentials are stored encrypted using Windows DPAPI.
 """
@@ -190,8 +191,35 @@ async def main():
 
     print()
 
-    # Step 5: GCP Integration
-    print("Step 5: Google Cloud Platform Integration")
+    # Step 5: Eleven Labs TTS API key
+    print("Step 5: Eleven Labs TTS (Text-to-Speech)")
+    print("-" * 40)
+
+    eleven_labs_key = stored_creds.get("eleven_labs_api_key", "") or os.environ.get("ELEVEN_LABS_API_KEY", "")
+
+    if eleven_labs_key:
+        print(f"Eleven Labs API key: {eleven_labs_key[:12]}... (stored)")
+    else:
+        print("Eleven Labs enables AI-powered voice responses through your doorbell.")
+        print()
+        print("Get an API key at: https://elevenlabs.io")
+        print("  1. Create an account (free tier available)")
+        print("  2. Go to Profile Settings -> API Keys")
+        print("  3. Copy your API key")
+        print()
+        eleven_labs_key = input("Enter your Eleven Labs API key (or Enter to skip): ").strip()
+
+    if eleven_labs_key:
+        os.environ["ELEVEN_LABS_API_KEY"] = eleven_labs_key
+        save_credentials({"eleven_labs_api_key": eleven_labs_key})
+        print("Eleven Labs API key saved securely.")
+    else:
+        print("Skipping Eleven Labs setup. TTS responses will not be available.")
+
+    print()
+
+    # Step 6: GCP Integration
+    print("Step 6: Google Cloud Platform Integration")
     print("-" * 40)
 
     gcp_project = stored_creds.get("gcp_project_id", "") or os.environ.get("GCP_PROJECT_ID", "")
@@ -232,8 +260,8 @@ async def main():
 
     print()
 
-    # Step 6: Test RTSP capture (optional)
-    print("Step 6: Test RTSP Video Capture")
+    # Step 7: Test RTSP capture (optional)
+    print("Step 7: Test RTSP Video Capture")
     print("-" * 40)
 
     # Check if ffmpeg is available
@@ -259,9 +287,9 @@ async def main():
                     if result.video_path:
                         print(f"Success! Video saved to: {result.video_path}")
                         print(f"File size: {result.video_path.stat().st_size} bytes")
-                    elif result.frames:
-                        print(f"Success! Captured {len(result.frames)} frames")
-                        print(f"First frame: {result.frames[0]}")
+                    elif result.frame_paths:
+                        print(f"Success! Captured {len(result.frame_paths)} frames")
+                        print(f"First frame: {result.frame_paths[0]}")
                 else:
                     print(f"Capture failed: {result.error}")
                     print("\nTroubleshooting:")
@@ -276,8 +304,8 @@ async def main():
 
     print()
 
-    # Step 7: Optional diagnostics
-    print("Step 7: Run Diagnostics (Optional)")
+    # Step 8: Optional diagnostics
+    print("Step 8: Run Diagnostics (Optional)")
     print("-" * 40)
     print("These tests verify your setup is working correctly.")
     print()
